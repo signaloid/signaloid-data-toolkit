@@ -1,6 +1,6 @@
 # Distributional Information Plotting
 
-Tools for visualising and sampling from Signaloid distributional data.
+Tools for visualizing and sampling from Signaloid distributional data.
 
 ## Plotting a Ux-string
 
@@ -15,7 +15,7 @@ ux_string = "0.40007Ux0000000000000000013FD99AC12423C7C7000000013FD99AC12423C7C7
 
 dist_value = DistributionalValue.parse(ux_string)
 if dist_value is None:
-    raise ValueError(f"Failed to parse Ux string: {ux_string}")
+    raise ValueError(f"Failed to parse Ux-string: {ux_string}")
 
 plot_data = PlotData(dist_value)
 
@@ -45,19 +45,19 @@ plot(plot_data, path="output.png", save=True)
 
 Non-finite values (`NaN`, `-Inf`, `+Inf`) in the samples array are automatically separated and displayed in a dedicated special-values panel alongside the main histogram.
 
-## Customising the plot
+## Customizing the plot
 
 The `plot()` function accepts several optional parameters:
 
 ```python
 plot(
     plot_data,
-    path="output.png",                   # Output file path
+    path="output.png",                    # Output file path
     save=True,                            # Save to file (False = show interactively)
-    plot_expected_value_line=True,         # Vertical line at the mean
+    plot_expected_value_line=True,        # Vertical line at the mean
     x_lim=(-5, 5),                        # Custom x-axis limits
     y_lim=(0, 0.5),                       # Custom y-axis limits
-    x_label="My Variable",               # Custom x-axis label
+    x_label="My Variable",                # Custom x-axis label
     x_tick_label_rotation=45,             # Rotate x-axis tick labels
     font_size=20,                         # Font size for labels
     matplotlib_rc_params_override={...},  # Custom matplotlib rc params

@@ -21,6 +21,8 @@
 
 import sys
 import math
+import functools
+import operator
 
 if sys.implementation.name != "circuitpython":
     # Use numpy for accelerated computing
@@ -249,13 +251,18 @@ class PlotData:
             return (boundary_positions, boundary_probabilities)
 
         # First handle internal boundary positions.
+        # Strided slices select the boundaries, because the ulab NumPy of
+        # CircuitPython does not support integer-array indexing.
         for n in range(exponent):
             step = 2**n
-            indices = np.arange(2 ** (n + 1), number_of_boundaries - 1, 2 ** (n + 2))
-            if len(indices) == 0:
+            start = 2 ** (n + 1)
+            stop = number_of_boundaries - 1
+            stride = 2 ** (n + 2)
+            if start >= stop:
                 continue
-            left = indices - step
-            right = indices + step
+            indices = slice(start, stop, stride)
+            left = slice(start - step, stop - step, stride)
+            right = slice(start + step, stop + step, stride)
             boundary_probabilities[indices] = (
                 boundary_probabilities[left] + boundary_probabilities[right]
             )
@@ -401,16 +408,18 @@ class PlotData:
         bin_heights = np.array([np.nan] * numberOfBins)
 
         # Vectorise internal bin height computation for Dirac deltas 1..N-2.
+        # The bins left of Dirac deltas 1..N-2 are 2, 4, ..., 2N-4, and the bins
+        # right of them are 3, 5, ..., 2N-3. Strided slices select them, because
+        # the ulab NumPy of CircuitPython does not support integer-array indexing.
         if number_of_finite_dirac_deltas > 2:
-            internal = np.arange(1, number_of_finite_dirac_deltas - 1)
-            masses = np.array([finite_sorted_dirac_deltas[i].mass for i in internal])
-            left_idx = 2 * internal
-            right_idx = left_idx + 1
-            w_left = bin_widths[left_idx]
-            w_right = bin_widths[right_idx]
+            masses = np.array([dd.mass for dd in finite_sorted_dirac_deltas[1:-1]])
+            left = slice(2, 2 * number_of_finite_dirac_deltas - 2, 2)
+            right = slice(3, 2 * number_of_finite_dirac_deltas - 2, 2)
+            w_left = bin_widths[left]
+            w_right = bin_widths[right]
             avg_h = masses / (w_left + w_right)
-            bin_heights[left_idx] = avg_h * w_right / w_left
-            bin_heights[right_idx] = avg_h * w_left / w_right
+            bin_heights[left] = avg_h * w_right / w_left
+            bin_heights[right] = avg_h * w_left / w_right
 
         boundary_positions, bin_widths, bin_heights = PlotData._handle_extremal_bins(
             finite_sorted_dirac_deltas,
@@ -525,6 +534,63 @@ class PlotData:
         return boundary_positions
 
     @staticmethod
+    def _first_collapsed_cell(
+        boundary_positions: np.ndarray, positions: np.ndarray
+    ) -> int | None:
+        """
+        Finds the first cell that does not hold its Dirac delta strictly inside it,
+        i.e., whose bin is empty or inverted, or has a boundary on or past its Dirac
+        delta. Boundaries that are valid in exact arithmetic can still collapse a
+        cell once they are rounded.
+
+        Args:
+            boundary_positions: The (N + 1) boundary positions of the N cells.
+            positions: The N Dirac delta positions, one per cell.
+        Returns:
+            The index of the first such cell, or `None` when every cell holds its
+            Dirac delta.
+        """
+
+        for i in range(len(positions)):
+            if not (boundary_positions[i] < positions[i] < boundary_positions[i + 1]):
+                return i
+
+        return None
+
+    @staticmethod
+    def _merge_into_nearest_neighbour(
+        dirac_deltas: list[DiracDelta], index: int
+    ) -> list[DiracDelta]:
+        """
+        Merges the Dirac delta at `index` with its nearest neighbour, the one across
+        the smaller gap and the lower one on a tie. The merge keeps the mass and the
+        mean of the two.
+
+        Args:
+            dirac_deltas: Dirac deltas with strictly increasing positions, at least
+                two.
+            index: The index of the Dirac delta to merge.
+        Returns:
+            The Dirac deltas with the two merged into one.
+        """
+
+        if index == 0:
+            neighbour = 1
+        elif index == len(dirac_deltas) - 1:
+            neighbour = index - 1
+        else:
+            gap_below = dirac_deltas[index].position - dirac_deltas[index - 1].position
+            gap_above = dirac_deltas[index + 1].position - dirac_deltas[index].position
+            neighbour = index - 1 if gap_below <= gap_above else index + 1
+
+        lower = min(index, neighbour)
+        return (
+            dirac_deltas[:lower]
+            + [dirac_deltas[lower] + dirac_deltas[lower + 1]]
+            + dirac_deltas[lower + 2 :]
+        )
+
+    @staticmethod
     def _local_mean_boundary_positions(positions: np.ndarray) -> np.ndarray | None:
         """
         Places the bin boundaries so that every bin is centred on the Dirac delta it
@@ -587,11 +653,7 @@ class PlotData:
 
         # The constraints are solved in exact arithmetic, so re-check the result
         # rather than trust that rounding kept every bin valid and populated.
-        if not (
-            bool(np.all(boundary_positions[1:] > boundary_positions[:-1]))
-            and bool(np.all(positions > boundary_positions[:-1]))
-            and bool(np.all(positions < boundary_positions[1:]))
-        ):
+        if PlotData._first_collapsed_cell(boundary_positions, positions) is not None:
             return None
 
         return boundary_positions
@@ -621,6 +683,12 @@ class PlotData:
         but never further off than placing every boundary at a midpoint would leave
         it.
 
+        Near a large magnitude, that placement can round a boundary onto or past a
+        Dirac delta, which would leave a bin of zero width and infinite density. The
+        Dirac delta of such a bin is then merged into its nearest neighbour, which
+        keeps the mass and the mean, and the merged Dirac deltas are binned instead.
+        The binning then has one bin fewer than there are input Dirac deltas.
+
         Args:
             finite_sorted_dirac_deltas: The input Dirac deltas with finite,
                 strictly increasing positions. At least two are required.
@@ -631,7 +699,8 @@ class PlotData:
             ValueError: When given fewer than two Dirac deltas. A lone Dirac delta
                 has no adjacent Dirac delta to place a bin boundary against, so it
                 has no bin width. Callers plot it as a Dirac delta instead, which is
-                what `_construct_plot_data` does.
+                what `_construct_plot_data` does. Also when merging leaves a lone
+                Dirac delta, which takes two Dirac deltas only a few ulps apart.
         """
 
         if len(finite_sorted_dirac_deltas) < 2:
@@ -687,6 +756,19 @@ class PlotData:
         boundary_positions = PlotData._cell_boundary_positions(
             positions, interior_weight
         )
+
+        # Near a large magnitude, the clamped placement can round a boundary onto or
+        # past a Dirac delta, which would leave a bin of zero width and infinite
+        # density. Merge that Dirac delta into its nearest neighbour, which keeps the
+        # mass and the mean, and bin the merged Dirac deltas instead.
+        collapsed_cell = PlotData._first_collapsed_cell(boundary_positions, positions)
+        if collapsed_cell is not None:
+            return PlotData.create_non_uniform_binning(
+                PlotData._merge_into_nearest_neighbour(
+                    finite_sorted_dirac_deltas, collapsed_cell
+                )
+            )
+
         bin_widths = boundary_positions[1:] - boundary_positions[:-1]
         bin_heights = masses / bin_widths
 
@@ -705,10 +787,17 @@ class PlotData:
             bin_heights: Heights of the bins of the input bin PDF.
         Returns:
             expected_dirac_delta: The expected Dirac delta in the format np.array([position, mass]).
+        Raises:
+            ValueError: If the bin PDF has no mass. A split of bins only a few
+                ulps wide can leave one half empty.
         """
 
         probabilities = bin_widths * bin_heights
         probability_sum = float(np.sum(probabilities))
+        if probability_sum == 0:
+            raise ValueError(
+                "The bin PDF has no mass, so it has no expected Dirac delta."
+            )
         bin_centres = (boundary_positions[1:] + boundary_positions[:-1]) / 2
         moment_sum = float(np.sum(probabilities * bin_centres))
 
@@ -741,6 +830,8 @@ class PlotData:
         Returns:
             ttr: The TTR of the input bin PDF, a (2 ** `order`)-length array of Dirac deltas
                 with each Dirac delta of the form np.array([position, mass]).
+        Raises:
+            ValueError: If a split leaves a half with no mass.
         """
 
         expected_dirac_delta = PlotData._bin_pdf_expected_dirac_delta(
@@ -841,18 +932,10 @@ class PlotData:
                 "plot_histogram_dirac_deltas: plotting_resolution must be a power of 2!"
             )
 
-        # Athens / Atlas values come off a TTR core, so bin them by the TTR
-        # route regardless of what `check_is_full_valid_TTR` reports. That check
-        # fails for reasons that say nothing about whether the value is
-        # TTR-shaped — `drop_zero_mass_positions` and `cure` leave a
-        # non-power-of-2 Dirac count, or the reconstructed boundaries tie rather
-        # than strictly increase — and demoting those values to the non-uniform
-        # binning measures them against a support model their core never used.
-        # The route is safe on an invalid TTR because `bin_pdf_to_ttr` below
-        # projects whatever it is handed onto a valid TTR before the TTR binning
-        # method sees it; the `except` still catches the cases it cannot.
-        # Jupiter's Dirac deltas are particles, not a TTR, so it keeps the
-        # valid-TTR gate and otherwise falls through to the non-uniform binning.
+        # Use TTR binning method for Athens/Atlas as they use TTR split as compression method.
+        # Not all Athens/Atlas outputs as valid TTRs as they could have ended with a libm operation
+        # on just the positions and so does not trigger an additional split. Jupiter can produce
+        # valid TTRs as well as so apply the check first before falling back to the non-uniform binning method.
         use_ttr_route = (
             self.dist.UR_type in TTR_NATIVE_UR_TYPES
             or self.dist.check_is_full_valid_TTR()
@@ -903,12 +986,26 @@ class PlotData:
             boundary_positions, bin_widths, bin_heights = PlotData.create_binning(
                 finite_dirac_deltas, 0, False
             )
-            finite_dirac_deltas = PlotData.bin_pdf_to_ttr(
-                boundary_positions,
-                bin_widths,
-                bin_heights,
-                reduction_order,
-            )
+            try:
+                finite_dirac_deltas = PlotData.bin_pdf_to_ttr(
+                    boundary_positions,
+                    bin_widths,
+                    bin_heights,
+                    reduction_order,
+                )
+            except ValueError:
+                # A support only a few ulps wide cannot be split. Merge runs of
+                # neighbouring Dirac deltas instead, into as many as the TTR
+                # would give. Each merge keeps the mass and the mean.
+                groups = np.array_split(
+                    np.arange(len(finite_dirac_deltas)), 2**reduction_order
+                )
+                finite_dirac_deltas = [
+                    functools.reduce(
+                        operator.add, (finite_dirac_deltas[i] for i in group)
+                    )
+                    for group in groups
+                ]
 
         boundary_positions, bin_widths, bin_heights = (
             PlotData.create_non_uniform_binning(finite_dirac_deltas)

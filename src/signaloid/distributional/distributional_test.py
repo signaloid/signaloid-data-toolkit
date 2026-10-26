@@ -538,6 +538,29 @@ class TestPositiveMassSupport(unittest.TestCase):
         np.testing.assert_allclose(masses, [0.5, 0.5])
 
 
+class TestCombineDiracDeltas(unittest.TestCase):
+    """Combining Dirac deltas that sit closer than the merge threshold."""
+
+    def test_coincident_dirac_deltas_combine_whatever_the_sign(self) -> None:
+        """
+        Two Dirac deltas one ulp apart combine into one, for a negative mean as
+        for a positive one. The position is from a Ux string in #51.
+        """
+        for position in (-159.9259999999995, 159.9259999999995):
+            with self.subTest(position=position):
+                dist = DistributionalValue(
+                    dirac_deltas=[
+                        DiracDelta(position, mass=0.3),
+                        DiracDelta(float(np.nextafter(position, np.inf)), mass=0.7),
+                    ]
+                )
+
+                dist.combine_dirac_deltas()
+
+                self.assertEqual(len(dist.finite_dirac_deltas), 1)
+                self.assertAlmostEqual(dist.finite_dirac_deltas[0].mass, 1.0)
+
+
 class TestDistributionalValueRange(unittest.TestCase):
     """`DistributionalValue.range` — positions.max() - positions.min()."""
 

@@ -66,7 +66,7 @@ accept = kolmogorov_smirnov_wrapper(
 
 ## CLI usage
 
-`ks_hypothesis.py` exposes a `python -m …` entry point that parses two Ux strings, runs a KS hypothesis test at the given significance level, prints the verdict, and exits non-zero when the null hypothesis is rejected.
+`ks_hypothesis.py` exposes a `python -m …` entry point that parses two Ux-strings, runs a KS hypothesis test at the given significance level, prints the verdict, and exits non-zero when the null hypothesis is rejected.
 
 ```bash
 # Bootstrapped KS test (default)
@@ -80,6 +80,6 @@ python -m signaloid.statistical_tests.ks_hypothesis \
     <dist_ux> <reference_ux> <significance_level> --test one-sample
 ```
 
-> **Note:** Ux strings with a leading `-` (e.g. `-0.0Ux…`) get parsed by `argparse` as flags. Place any options (`--test`, `--seed`, …) *before* the positional arguments, or use the `--` separator before the leading-minus Ux string.
+> **Note:** Ux-strings with a leading `-` (e.g. `-0.0Ux…`) get parsed by `argparse` as flags. Place any options (`--test`, `--seed`, …) *before* the positional arguments, or use the `--` separator before the leading-minus Ux-string.
 
 > **Note:** The Kolmogorov-Smirnov *distance* (sup-norm between two empirical CDFs) is a distance metric rather than a hypothesis test, and lives in `signaloid.distributional_distance.ks_distance`.

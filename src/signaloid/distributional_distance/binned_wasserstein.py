@@ -36,21 +36,6 @@ from signaloid.distributional_distance._validators import (
 )
 
 
-def integrate_trapezoid(x0: float, x1: float, y0: float, y1: float) -> float:
-    """Area of a trapezoid / triangle / rectangle defined by two heights.
-
-    Args:
-        x0: left position
-        x1: right position
-        y0: left height
-        y1: right height
-
-    Returns:
-        Area of the trapezoid / triangle / rectangle.
-    """
-    return 0.5 * (y0 + y1) * (x1 - x0)
-
-
 def normalized_uxhw_cdf_heights(
     bin_widths: np.ndarray, bin_heights: np.ndarray
 ) -> np.ndarray:
@@ -123,105 +108,6 @@ def normalized_sample_cdf_heights(
     return np.cumsum(single_step_areas)
 
 
-def build_position_and_type_array(
-    uxhw_cdf_boundaries: np.ndarray,
-    sample_cdf_positions: np.ndarray,
-    positions: np.ndarray,
-    types: np.ndarray,
-    num_boundaries: int,
-    num_samples: int,
-) -> None:
-    """Build a sorted union of UxHw boundaries and sample positions.
-
-    Each entry in `positions` is tagged in `types` with its origin:
-    `0` for a UxHw bin boundary, `1` for a sample position. The two
-    output arrays are filled in place and then sorted in tandem by
-    position.
-
-    Args:
-        uxhw_cdf_boundaries: Boundaries of the UxHw distribution binning.
-        sample_cdf_positions: Sample positions.
-        positions: Output array (length num_boundaries + num_samples)
-            to be filled with all points and then sorted in place.
-        types: Output array (same length) tagging each position's origin
-            (0 = boundary, 1 = sample), kept aligned with `positions`.
-        num_boundaries: len(uxhw_cdf_boundaries).
-        num_samples: len(sample_cdf_positions).
-    """
-    positions[:num_boundaries] = uxhw_cdf_boundaries
-    types[:num_boundaries] = 0
-    positions[num_boundaries:] = sample_cdf_positions
-    types[num_boundaries:] = 1
-
-    # Sort positions and types in tandem. Use lexsort with `types` as
-    # the secondary key so that at tied positions (boundary coincident
-    # with a sample) boundaries (type=0) come before samples (type=1)
-    # — `wasserstein_1_core`'s segment/step bookkeeping assumes this
-    # ordering. `np.argsort(positions)` alone would not be stable on
-    # all numpy versions/platforms.
-    indices = np.lexsort((types, positions))
-    positions[:] = positions[indices]
-    types[:] = types[indices]
-
-
-def fill_cdf_values(
-    uxhw_cdf_vals: np.ndarray,
-    uxhw_cdf_idx: np.ndarray,
-    uxhw_cdf_boundaries: np.ndarray,
-    uxhw_cdf_heights: np.ndarray,
-    uxhw_cdf_widths: np.ndarray,
-    sample_cdf_vals: np.ndarray,
-    sample_cdf_idx: np.ndarray,
-    sample_cdf_heights: np.ndarray,
-    positions: np.ndarray,
-    num_points_total: int,
-    num_boundaries: int,
-) -> None:
-    """Evaluate the UxHw and empirical CDFs at every merged position.
-
-    Fills `uxhw_cdf_vals` and `sample_cdf_vals` in place. For the UxHw
-    CDF, each `position[i]` lies within bin segment `uxhw_cdf_idx[i]`.
-    The value is linearly interpolated using the segment's slope, with
-    clamps below the first / above the last boundary. For the empirical
-    CDF, each `position[i]` lies after step `sample_cdf_idx[i]`. The
-    value is the cumulative weight at that step (left as 0.0 when the
-    point precedes the first sample, courtesy of the caller's `zeros`
-    initialisation of `sample_cdf_vals`).
-
-    Args:
-        uxhw_cdf_vals: Output — UxHw CDF values at each merged position.
-        uxhw_cdf_idx: Per-position UxHw segment index.
-        uxhw_cdf_boundaries: UxHw bin boundaries (length N+1).
-        uxhw_cdf_heights: UxHw cumulative CDF heights (length N+1,
-            starting at 0).
-        uxhw_cdf_widths: UxHw bin widths (length N).
-        sample_cdf_vals: Output — empirical CDF values. Caller must
-            pre-initialise to zeros. Entries with `sample_cdf_idx[i] == 0`
-            are left untouched.
-        sample_cdf_idx: Per-position sample step index.
-        sample_cdf_heights: Empirical cumulative CDF heights.
-        positions: Merged + sorted positions array.
-        num_points_total: Length of `positions`.
-        num_boundaries: Length of `uxhw_cdf_boundaries`.
-    """
-    for i in range(num_points_total):
-        if sample_cdf_idx[i] > 0:
-            sample_cdf_vals[i] = sample_cdf_heights[sample_cdf_idx[i]]
-
-        idx = uxhw_cdf_idx[i]
-        if idx < 0:
-            uxhw_cdf_vals[i] = 0.0
-        elif idx >= num_boundaries - 1:
-            uxhw_cdf_vals[i] = 1.0
-        else:
-            uxhw_cdf_slope = (
-                uxhw_cdf_heights[idx + 1] - uxhw_cdf_heights[idx]
-            ) / uxhw_cdf_widths[idx]
-            uxhw_cdf_vals[i] = uxhw_cdf_heights[idx] + uxhw_cdf_slope * (
-                positions[i] - uxhw_cdf_boundaries[idx]
-            )
-
-
 def wasserstein_1_core(
     uxhw_cdf_boundaries: np.ndarray,
     uxhw_cdf_widths: np.ndarray,
@@ -231,6 +117,14 @@ def wasserstein_1_core(
 ) -> float:
     """Wasserstein-1 distance between a binned UxHw CDF and an empirical
     sample CDF.
+
+    Merges the bin boundaries and sample positions into one sorted array,
+    evaluates both CDFs at every merged position and integrates the
+    absolute difference piecewise. Between two consecutive merged
+    positions the UxHw CDF is linear and the empirical CDF is constant,
+    so their difference is linear there and its absolute value
+    integrates exactly as a trapezoid, or as two triangles where the
+    difference changes sign.
 
     Caller-validates contract: this is the inner algorithmic core and
     does not validate its inputs. The only intended caller is
@@ -253,93 +147,85 @@ def wasserstein_1_core(
     Returns:
         Wasserstein-1 distance between the two CDFs.
     """
-    # Fit all positions in a single array that will be sorted afterwards
-    # by build_position_and_type_array.
     num_boundaries = len(uxhw_cdf_boundaries)
-    num_samples = len(sample_cdf_positions)
-    num_points_total = num_boundaries + num_samples
+    num_bins = num_boundaries - 1
 
-    positions = np.empty(num_points_total, dtype=np.float64)
-    types = np.empty(num_points_total, dtype=np.int8)
-
-    build_position_and_type_array(
-        uxhw_cdf_boundaries,
-        sample_cdf_positions,
-        positions,
-        types,
-        num_boundaries,
-        num_samples,
+    # Merge the boundaries and sample positions, tagging each entry with
+    # its origin: 0 for a bin boundary, 1 for a sample. Sort with `types`
+    # as the secondary key so that at tied positions (boundary coincident
+    # with a sample) the boundary comes first. The index bookkeeping
+    # below relies on this ordering. `np.argsort(positions)` alone would
+    # not be stable on all numpy versions/platforms.
+    positions = np.concatenate((uxhw_cdf_boundaries, sample_cdf_positions))
+    types = np.concatenate(
+        (
+            np.zeros(num_boundaries, dtype=np.int8),
+            np.ones(len(sample_cdf_positions), dtype=np.int8),
+        )
     )
+    order = np.lexsort((types, positions))
+    positions = positions[order]
+    is_sample = types[order] == 1
 
     # `uxhw_cdf_idx[j]` is the linear segment of the UxHw CDF that
-    # position[j] lives in. `sample_cdf_idx[j]` is the constant segment
-    # of the sample empirical CDF.
-    uxhw_cdf_idx = np.empty(num_points_total, dtype=np.int32)
-    sample_cdf_idx = np.empty(num_points_total, dtype=np.int32)
-    current_seg = -1
-    current_step = 0
+    # positions[j] lives in: -1 before the first boundary, num_bins at
+    # and after the last. `sample_cdf_idx[j]` is the number of samples
+    # at or before positions[j], i.e. the constant segment of the
+    # empirical CDF.
+    uxhw_cdf_idx = np.cumsum(~is_sample) - 1
+    sample_cdf_idx = np.cumsum(is_sample)
 
-    for j in range(num_points_total):
-        if types[j] == 0:
-            current_seg += 1
-        else:
-            current_step += 1
+    # Empirical CDF at each merged position. `sample_cdf_heights[0]` is
+    # 0, so points before the first sample evaluate to 0.
+    sample_cdf_vals = sample_cdf_heights[sample_cdf_idx]
 
-        uxhw_cdf_idx[j] = current_seg
-        sample_cdf_idx[j] = current_step
-
-    # Now that we know the type for each point, fill in the CDF values.
-    uxhw_cdf_vals = np.empty(num_points_total, dtype=np.float64)
-    sample_cdf_vals = np.zeros(num_points_total, dtype=np.float64)
-
-    fill_cdf_values(
-        uxhw_cdf_vals,
-        uxhw_cdf_idx,
-        uxhw_cdf_boundaries,
-        uxhw_cdf_heights,
-        uxhw_cdf_widths,
-        sample_cdf_vals,
-        sample_cdf_idx,
-        sample_cdf_heights,
-        positions,
-        num_points_total,
-        num_boundaries,
+    # UxHw CDF at each merged position: linear interpolation within the
+    # segment, clamped to 0 before the first boundary and to 1 at and
+    # after the last. The segment index is clipped so the interpolation
+    # is evaluated on a real segment everywhere, then the clamped ends
+    # are overwritten.
+    segment = np.clip(uxhw_cdf_idx, 0, num_bins - 1)
+    slopes = np.diff(uxhw_cdf_heights) / uxhw_cdf_widths
+    uxhw_cdf_vals = uxhw_cdf_heights[segment] + slopes[segment] * (
+        positions - uxhw_cdf_boundaries[segment]
     )
+    uxhw_cdf_vals[uxhw_cdf_idx < 0] = 0.0
+    uxhw_cdf_vals[uxhw_cdf_idx >= num_bins] = 1.0
 
-    # Compute the trapezoid / triangle / rectangle segment sizes.
-    # delta_left and delta_right are the relative CDF heights at the
-    # left and right of each trapezoid. left_pos / right_pos are the
-    # corresponding x-positions. We use `sample_cdf_vals[:-1]` for
-    # delta_right because the step-wise CDF is right-continuous — we
-    # compare to the left (previous) CDF height.
+    # Signed gap between the CDFs at the left and right end of every
+    # interval between consecutive merged positions. The empirical CDF is
+    # right-continuous, so inside the interval it keeps the value it has
+    # at the left end: both gaps use `sample_cdf_vals[:-1]`.
     delta_left = uxhw_cdf_vals[:-1] - sample_cdf_vals[:-1]
     delta_right = uxhw_cdf_vals[1:] - sample_cdf_vals[:-1]
     left_pos = positions[:-1]
     right_pos = positions[1:]
 
-    total_distance = np.zeros(num_points_total - 1, dtype=np.float64)
-    for i in range(num_points_total - 1):
-        y0 = delta_left[i]
-        y1 = delta_right[i]
-        x0 = left_pos[i]
-        x1 = right_pos[i]
+    # Each interval contributes a trapezoid of the absolute gap. Where
+    # the gap changes sign it crosses zero at `mid`, and the interval
+    # contributes two triangles instead.
+    interval_areas = (
+        0.5 * (np.abs(delta_left) + np.abs(delta_right)) * (right_pos - left_pos)
+    )
+    crossing = delta_left * delta_right < 0.0
+    y0 = delta_left[crossing]
+    y1 = delta_right[crossing]
+    x0 = left_pos[crossing]
+    x1 = right_pos[crossing]
+    mid = x0 + y0 / (y0 - y1) * (x1 - x0)
+    interval_areas[crossing] = 0.5 * np.abs(y0) * (mid - x0) + 0.5 * np.abs(y1) * (
+        x1 - mid
+    )
 
-        if y0 * y1 < 0.0:
-            mid = x0 + y0 / (y0 - y1) * (x1 - x0)
-            total_distance[i] = integrate_trapezoid(x0, mid, abs(y0), 0.0)
-            total_distance[i] += integrate_trapezoid(mid, x1, 0.0, abs(y1))
-        else:
-            total_distance[i] = integrate_trapezoid(x0, x1, abs(y0), abs(y1))
-
-    return float(np.sum(total_distance))
+    return float(np.sum(interval_areas))
 
 
 def _validate_binned_lengths(
-    bin_boundaries: list[float],
-    bin_heights: list[float],
-    bin_widths: list[float],
-    sample_positions: list[float],
-    sample_weights: list[float] | None,
+    bin_boundaries: np.ndarray,
+    bin_heights: np.ndarray,
+    bin_widths: np.ndarray,
+    sample_positions: np.ndarray,
+    sample_weights: np.ndarray | None,
 ) -> None:
     """Structural length / non-empty checks for the binned wrapper."""
     if len(bin_widths) == 0:
@@ -359,11 +245,11 @@ def _validate_binned_lengths(
 
 
 def _validate_binned_semantics(
-    bin_boundaries: list[float],
-    bin_heights: list[float],
-    bin_widths: list[float],
-    sample_positions: list[float],
-    sample_weights: list[float] | None,
+    bin_boundaries: np.ndarray,
+    bin_heights: np.ndarray,
+    bin_widths: np.ndarray,
+    sample_positions: np.ndarray,
+    sample_weights: np.ndarray | None,
 ) -> None:
     """Finite + non-negativity / positivity checks on the raw inputs.
 
@@ -420,11 +306,11 @@ def _validate_binned_semantics(
 
 
 def _validate_binned_inputs(
-    bin_boundaries: list[float],
-    bin_heights: list[float],
-    bin_widths: list[float],
-    sample_positions: list[float],
-    sample_weights: list[float] | None,
+    bin_boundaries: np.ndarray,
+    bin_heights: np.ndarray,
+    bin_widths: np.ndarray,
+    sample_positions: np.ndarray,
+    sample_weights: np.ndarray | None,
 ) -> None:
     """Full validation for `wasserstein_1_between_distribution_and_samples`."""
     _validate_binned_lengths(
@@ -436,18 +322,19 @@ def _validate_binned_inputs(
 
 
 def wasserstein_1_between_distribution_and_samples(
-    bin_boundaries: list[float],
-    bin_heights: list[float],
-    bin_widths: list[float],
-    sample_positions: list[float],
-    sample_weights: list[float] | None = None,
+    bin_boundaries: list[float] | np.ndarray,
+    bin_heights: list[float] | np.ndarray,
+    bin_widths: list[float] | np.ndarray,
+    sample_positions: list[float] | np.ndarray,
+    sample_weights: list[float] | np.ndarray | None = None,
 ) -> float:
     """Wasserstein-1 distance between a binned distribution and samples.
 
-    Wraps the core CDF-merge algorithm: validates the raw inputs,
-    builds normalised cumulative CDFs for both sides, sorts the sample
-    side by position so the empirical CDF is well-defined, and delegates
-    to `wasserstein_1_core`.
+    Wraps the core CDF-merge algorithm: converts the inputs to arrays,
+    validates them, builds normalised cumulative CDFs for both sides,
+    sorts the sample side by position so the empirical CDF is
+    well-defined, and delegates to `wasserstein_1_core`. Inputs may be
+    lists or numpy arrays.
 
     Args:
         bin_boundaries: Distribution bin boundaries, length N+1, sorted.
@@ -467,26 +354,37 @@ def wasserstein_1_between_distribution_and_samples(
             on either side. See `_validate_binned_lengths` and
             `_validate_binned_semantics` for the full check list.
     """
-    _validate_binned_inputs(
-        bin_boundaries, bin_heights, bin_widths, sample_positions, sample_weights
+    # Convert to np arrays once. Validation and the core both work on
+    # these, so list inputs are converted a single time and array inputs
+    # are used as they are.
+    uxhw_cdf_boundaries: np.ndarray = np.asarray(bin_boundaries, dtype=np.float64)
+    uxhw_bin_heights: np.ndarray = np.asarray(bin_heights, dtype=np.float64)
+    uxhw_cdf_widths: np.ndarray = np.asarray(bin_widths, dtype=np.float64)
+    sample_cdf_positions: np.ndarray = np.asarray(sample_positions, dtype=np.float64)
+    sample_cdf_weights: np.ndarray | None = (
+        None if sample_weights is None else np.asarray(sample_weights, dtype=np.float64)
     )
 
-    if sample_weights is None:
-        sample_weights = [1.0 / len(sample_positions)] * len(sample_positions)
+    _validate_binned_inputs(
+        uxhw_cdf_boundaries,
+        uxhw_bin_heights,
+        uxhw_cdf_widths,
+        sample_cdf_positions,
+        sample_cdf_weights,
+    )
 
-    # Convert to np arrays.
-    uxhw_cdf_boundaries: np.ndarray = np.array(bin_boundaries, dtype=np.float64)
-    uxhw_cdf_widths: np.ndarray = np.array(bin_widths, dtype=np.float64)
+    if sample_cdf_weights is None:
+        num_samples = len(sample_cdf_positions)
+        sample_cdf_weights = np.full(num_samples, 1.0 / num_samples)
+
     uxhw_cdf_heights: np.ndarray = normalized_uxhw_cdf_heights(
-        uxhw_cdf_widths, np.array(bin_heights, dtype=np.float64)
+        uxhw_cdf_widths, uxhw_bin_heights
     )
     uxhw_cdf_heights = np.append([0.0], uxhw_cdf_heights)
 
     # The empirical CDF is cumulative-in-position-order, so positions
     # (and their matching weights) must be sorted by position before
     # cumsum. Callers may pass any ordering. Sort here.
-    sample_cdf_positions: np.ndarray = np.array(sample_positions, dtype=np.float64)
-    sample_cdf_weights: np.ndarray = np.array(sample_weights, dtype=np.float64)
     sample_sort_order: np.ndarray = np.argsort(sample_cdf_positions)
     sample_cdf_positions = sample_cdf_positions[sample_sort_order]
     sample_cdf_weights = sample_cdf_weights[sample_sort_order]
@@ -561,11 +459,11 @@ def binned_wasserstein_1_uxhw_wrapper(
     # which is exactly what `_construct_plot_data` avoids, and would leave
     # the measured distance disagreeing with the plotted distribution.
     return wasserstein_1_between_distribution_and_samples(
-        bin_boundaries=list(plot_interface.positions),
-        bin_heights=list(plot_interface.masses),
-        bin_widths=list(plot_interface.widths),
-        sample_positions=list(ground_truth_dist.positions),
-        sample_weights=list(ground_truth_dist.masses),
+        bin_boundaries=plot_interface.positions,
+        bin_heights=plot_interface.masses,
+        bin_widths=plot_interface.widths,
+        sample_positions=ground_truth_dist.positions,
+        sample_weights=ground_truth_dist.masses,
     )
 
 

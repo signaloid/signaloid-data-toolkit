@@ -30,7 +30,7 @@ print(wasserstein_1_uxhw_wrapper(dist_u, dist_v))
 print(wasserstein_2_uxhw_wrapper(dist_u, dist_v))
 ```
 
-## Normalised Wasserstein-p
+## Normalized Wasserstein-p
 
 Compute Wp after rescaling positions onto the ground-truth support `[0, 1]`. Same shortcut pattern: a generic `_p_` wrapper plus `_1_` / `_2_` shortcuts.
 
@@ -91,7 +91,7 @@ from signaloid.distributional_distance import (
 # From DistributionalValues
 print(binned_wasserstein_1_uxhw_wrapper(binned_dist, ground_truth_dist))
 
-# From Ux strings
+# From Ux-strings
 print(binned_wasserstein_1_ux_string_wrapper(distribution_ux, ground_truth_ux))
 
 # From pre-binned histogram data
@@ -125,7 +125,7 @@ distance = wasserstein_1_distance_with_weights(
 
 ## CLI usage
 
-`wasserstein.py`, `binned_wasserstein.py`, and `scalar.py` each expose a `python -m …` entry point that parses two Ux strings, computes the distance, and exits non-zero if the result exceeds the supplied tolerance.
+`wasserstein.py`, `binned_wasserstein.py`, and `scalar.py` each expose a `python -m …` entry point that parses two Ux-strings, computes the distance, and exits non-zero if the result exceeds the supplied tolerance.
 
 ```bash
 # Wasserstein-p (default p=1)
@@ -142,4 +142,4 @@ python -m signaloid.distributional_distance.scalar \
     [--metric relative|absolute|signed]
 ```
 
-> **Note:** Ux strings with a leading `-` (e.g. `-0.0Ux…`) get parsed by `argparse` as flags. Place any options (`--p N`, `--metric M`) *before* the positional arguments, or use the `--` separator before the leading-minus Ux string.
+> **Note:** Ux-strings with a leading `-` (e.g. `-0.0Ux…`) get parsed by `argparse` as flags. Place any options (`--p N`, `--metric M`) *before* the positional arguments, or use the `--` separator before the leading-minus Ux-string.

@@ -58,7 +58,7 @@ Ux String format specification:
                 - Probability mass (uint64_t)                   (  8 bytes)
 
 Requirements:
-- pip install git+https://github.com/signaloid/signaloid-python
+- pip install git+https://github.com/signaloid/signaloid-data-toolkit
 """
 
 import argparse
