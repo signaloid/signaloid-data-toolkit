@@ -23,7 +23,6 @@ import math
 import sys
 import re
 import struct
-from typing import overload
 
 if sys.implementation.name != "circuitpython":
     # Use numpy for accelerated computing
@@ -33,6 +32,17 @@ else:
     from signaloid.circuitpython.extended_ulab_numpy import np  # type: ignore[no-redef]
 
 from signaloid.distributional.dirac_delta import DiracDelta
+
+# CircuitPython has no typing module, so it gets a no-op @overload instead.
+# mypy treats TYPE_CHECKING as always true, so it only sees typing.overload.
+TYPE_CHECKING = False
+if not TYPE_CHECKING and sys.implementation.name == "circuitpython":
+
+    def overload(function):
+        return function
+
+else:
+    from typing import overload
 
 # The format strings used with struct.pack & struct.unpack for parsing and
 # dumping `DistributionalValue` data.
@@ -76,10 +86,10 @@ UR_TYPE_ATLAS = 0x07
 # non-power-of-2 Dirac count, which fails the check without making the value
 # any less TTR-shaped.
 #
-# Every other type — Jupiter, whose Dirac deltas are particles rather than a
-# TTR, and `UR_TYPE_UNSPECIFIED` — is left to `check_is_full_valid_TTR` to
-# route: the TTR binning when the value does happen to be a valid TTR, the
-# non-uniform binning when it does not.
+# Every other type is left to `check_is_full_valid_TTR` to route: the TTR
+# binning when the value does happen to be a valid TTR, the non-uniform
+# binning when it does not. That covers `UR_TYPE_UNSPECIFIED` and Jupiter,
+# whose Dirac deltas are particles rather than a TTR.
 TTR_NATIVE_UR_TYPES: frozenset[int] = frozenset({UR_TYPE_ATHENS, UR_TYPE_ATLAS})
 
 # First byte of the Ux Binary Data format, used to distinguish it from the legacy format
@@ -1218,7 +1228,10 @@ class DistributionalValue:
                 finite_mass += dd.mass
                 finite_mean += dd.position * dd.mass
             finite_mean /= finite_mass
-            mean_threshold = finite_mean * relative_mean_threshold
+            # The threshold is a distance, so it uses the size of the mean. A
+            # negative mean would otherwise give a negative threshold, and
+            # coincident Dirac deltas would never be combined.
+            mean_threshold = abs(finite_mean) * relative_mean_threshold
 
             range_threshold = (
                 self.finite_dirac_deltas[-1].position - self.dirac_deltas[0].position

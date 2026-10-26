@@ -91,7 +91,10 @@ def plot(
     if matplotlib_rc_params_override is not None:
         matplotlib_rcParams_update_defaults.update(matplotlib_rc_params_override)
 
-    matplotlib.rcParams.update(matplotlib_rcParams_update_defaults)
+    # matplotlib >= 3.11 types rcParams keys as literals.
+    matplotlib.rcParams.update(
+        matplotlib_rcParams_update_defaults  # type: ignore[arg-type]
+    )
 
     fig, axes = plt.subplots(
         nrows=1,
@@ -119,8 +122,11 @@ def plot(
             xytext=(plot_data.positions[0], 0),
             arrowprops={"arrowstyle": "->", "facecolor": "black", "lw": 3},
         )
-    else:
+    elif len(plot_data.positions) > 1:
         # Plot the binning: filled step area + step outline + bin edges.
+        # When there are no finite Dirac deltas at all (all mass on NaN or
+        # Inf), leave the main axis empty and only draw the special-values
+        # panel below.
         ax = plt.gca()
 
         # Plot the binning: filled step area + step outline + bin edges.

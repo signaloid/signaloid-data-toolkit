@@ -184,6 +184,37 @@ class TestBinnedWasserstein(unittest.TestCase):
         # strictly > 0 for non-identical distributions.
         self.assertAlmostEqual(result, 0.18323214623666018, places=12)
 
+    def test_dense_crossings_and_coincident_points(self) -> None:
+        """Exercises the vectorised core at scale: a bimodal 64-bin
+        distribution against ~2000 weighted samples from a unimodal
+        Gaussian, so the two CDFs cross many times. Every other bin
+        boundary also appears as a sample and three samples are
+        triplicated, so the merge sort sees tied positions of both kinds.
+        Inputs are passed as numpy arrays. The expected value was computed
+        with the pre-vectorisation, loop-based `wasserstein_1_core`."""
+        rng = np.random.default_rng(seed=20260922)
+        boundaries = np.linspace(-3.0, 3.0, 65)
+        widths = np.diff(boundaries)
+        centres = 0.5 * (boundaries[:-1] + boundaries[1:])
+        heights = np.exp(-2.0 * (centres - 1.5) ** 2) + np.exp(
+            -2.0 * (centres + 1.5) ** 2
+        )
+        heights = heights / np.sum(heights * widths)
+        samples = np.concatenate(
+            [
+                boundaries[::2],
+                np.repeat([-1.0, 0.0, 1.0], 3),
+                rng.normal(0.0, 1.2, 2000),
+            ]
+        )
+        weights = rng.random(len(samples))
+
+        distance = wasserstein_1_between_distribution_and_samples(
+            boundaries, heights, widths, samples, weights
+        )
+
+        self.assertAlmostEqual(distance, 0.5794905929410978, places=12)
+
 
 class TestBinnedInputValidation(unittest.TestCase):
     """Regression tests for input validation in

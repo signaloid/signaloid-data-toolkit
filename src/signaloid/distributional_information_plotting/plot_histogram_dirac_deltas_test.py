@@ -19,16 +19,18 @@
 #   DEALINGS IN THE SOFTWARE.
 
 
+import math
 import os
 import random
 import unittest
 
 import numpy as np
 from signaloid.distributional.dirac_delta import DiracDelta
-from signaloid.distributional.distributional import DistributionalValue
+from signaloid.distributional.distributional import UR_TYPE_ATHENS, DistributionalValue
 from signaloid.distributional_information_plotting.plot_histogram_dirac_deltas import (
     PlotData,
 )
+from signaloid.distributional_information_plotting.plot_wrapper import plot
 
 
 class TestCreateBinning(unittest.TestCase):
@@ -557,6 +559,63 @@ class TestCreateNonUniformBinning(unittest.TestCase):
             float(np.sum(probabilities * bin_centres)), 0.6, places=12
         )
 
+    # Near 1e6, no binning centres every bin on its Dirac delta, and the shared
+    # placement is clamped to `MIN_INTERIOR_WEIGHT`. That puts the first internal
+    # boundary 2e-14 above the first Dirac delta, which rounds onto it.
+    COLLAPSING_POSITIONS: list[float] = [1e6, 1e6 + 2e-8, 1e6 + 1, 1e6 + 1 + 2e-8]
+    COLLAPSING_MASSES: list[float] = [0.01, 0.98, 1e-10, 0.01]
+
+    def test_create_non_uniform_binning_merges_a_cell_that_rounding_collapses(
+        self,
+    ) -> None:
+        """A bin that rounding collapses to zero width would have an infinite
+        density. Its Dirac delta is merged into its nearest neighbour instead, so
+        every bin is finite, and the mass and the mean are kept."""
+        positions = np.array(self.COLLAPSING_POSITIONS)
+        masses = np.array(self.COLLAPSING_MASSES)
+        input_ensemble = [
+            DiracDelta(position, mass=mass) for position, mass in zip(positions, masses)
+        ]
+        self.assertIsNone(PlotData._local_mean_boundary_positions(positions))
+
+        (
+            boundary_positions,
+            bin_widths,
+            bin_heights,
+        ) = PlotData.create_non_uniform_binning(input_ensemble)
+
+        probabilities = bin_widths * bin_heights
+        total_mass = float(np.sum(masses))
+        input_mean = float(np.sum(positions * masses)) / total_mass
+        binning_mean = self._mean_of_binning(boundary_positions, probabilities)
+
+        self.assertEqual(len(bin_widths), len(input_ensemble) - 1)
+        self.assertTrue(np.all(boundary_positions[1:] > boundary_positions[:-1]))
+        self.assertTrue(np.all(np.isfinite(bin_heights)))
+        self.assertAlmostEqual(float(np.sum(probabilities)), total_mass, places=12)
+        self.assertLess(
+            abs(binning_mean / total_mass - input_mean), 1e-12 * abs(input_mean)
+        )
+
+    def test_value_with_a_collapsing_cell_plots_finite_densities(self) -> None:
+        """The same Dirac deltas, with a NaN and an unspecified representation
+        type, reach the non-uniform binning through `PlotData`."""
+        dist = DistributionalValue(
+            dirac_deltas=[
+                DiracDelta(position, mass=mass)
+                for position, mass in zip(
+                    self.COLLAPSING_POSITIONS, self.COLLAPSING_MASSES
+                )
+            ]
+            + [DiracDelta(float("nan"), mass=0.01)]
+        )
+
+        pd = PlotData(dist)
+
+        self.assertTrue(np.all(np.isfinite(pd.masses)))
+        self.assertTrue(np.all(np.diff(pd.positions) > 0))
+        self.assertTrue(math.isfinite(pd.max_value))
+
 
 class TestPlotDataFromSamples(unittest.TestCase):
     """Tests for PlotData.from_samples() (delegates to DistributionalValue)."""
@@ -647,9 +706,6 @@ class TestPlotDataFromSamples(unittest.TestCase):
         import matplotlib
 
         matplotlib.use("Agg")
-        from signaloid.distributional_information_plotting.plot_wrapper import (
-            plot,
-        )
 
         np.random.seed(42)
         samples = np.random.normal(0, 1, 500)
@@ -663,9 +719,6 @@ class TestPlotDataFromSamples(unittest.TestCase):
         import matplotlib
 
         matplotlib.use("Agg")
-        from signaloid.distributional_information_plotting.plot_wrapper import (
-            plot,
-        )
 
         np.random.seed(42)
         samples = np.concatenate(
@@ -781,6 +834,70 @@ class TestNonTTRBinningFallback(unittest.TestCase):
         self.assertGreater(int(np.sum(uniform_counts == 0)), 0)
 
         self._assert_gap_free_density(pd, dist)
+
+
+class TestNearCoincidentDiracDeltas(unittest.TestCase):
+    """Athens outputs whose Dirac deltas sit one or two ulps apart, from #51."""
+
+    UX_STRINGS = (
+        "Ux040000000000000001C063FDA1CAC0830100000002C063FDA1CAC0830126666666"
+        "66666600C063FDA1CAC083005999999999999C00",
+        "Ux040000000000000001C063FDA1CAC0830000000002C063FDA1CAC083007A5E353F"
+        "7CED9400C063FDA1CAC082FC05A1CAC083126E80",
+    )
+
+    def test_near_coincident_dirac_deltas_plot_as_one(self) -> None:
+        """They combine into one Dirac delta, and plotting does not raise."""
+        for ux_string in self.UX_STRINGS:
+            with self.subTest(ux_string=ux_string):
+                dist = DistributionalValue.parse(ux_string)
+                assert dist is not None
+
+                pd = PlotData(dist)
+
+                self.assertEqual(len(pd.dist.finite_dirac_deltas), 1)
+
+    def test_a_split_with_an_empty_half_raises_value_error(self) -> None:
+        """
+        Splitting bins a few ulps wide can leave one half with no mass. That
+        raises ValueError, which the TTR route catches to fall back.
+        """
+        dist = DistributionalValue.parse(self.UX_STRINGS[0])
+        assert dist is not None
+        boundary_positions, bin_widths, bin_heights = PlotData.create_binning(
+            dist.finite_dirac_deltas, 0, False
+        )
+
+        with self.assertRaises(ValueError):
+            PlotData.bin_pdf_to_ttr(boundary_positions, bin_widths, bin_heights, 1)
+
+    def test_a_support_a_few_hundred_ulps_wide_plots(self) -> None:
+        """
+        The Ux string printed for c = (a + b) / (a - b) in #51 combines into
+        these three Dirac deltas, a few hundred ulps apart around 1. Reducing
+        them for the plot cannot split them, so neighbours are merged instead,
+        down to the number of bins the plot asks for, keeping mass and mean.
+        """
+        dist = DistributionalValue(
+            UR_type=UR_TYPE_ATHENS,
+            dirac_deltas=[
+                DiracDelta(float.fromhex("0x1.ffffffffffbe5p-1"), mass=0.0048875),
+                DiracDelta(float.fromhex("0x1.0000000000001p+0"), mass=0.9904447),
+                DiracDelta(float.fromhex("0x1.0000000000034p+0"), mass=0.0046678),
+            ],
+        )
+
+        pd = PlotData(dist)
+
+        assert pd.plotting_ttr_order is not None
+        self.assertEqual(len(pd.masses), 2 ** max(pd.plotting_ttr_order, 1))
+        self.assertTrue(np.all(np.isfinite(pd.masses)))
+        widths = pd.positions[1:] - pd.positions[:-1]
+        self.assertAlmostEqual(float(np.sum(widths * pd.masses)), 1.0, places=9)
+        bin_centres = (pd.positions[1:] + pd.positions[:-1]) / 2
+        binning_mean = float(np.sum(widths * pd.masses * bin_centres))
+        assert dist.mean is not None
+        self.assertAlmostEqual(binning_mean, dist.mean, places=9)
 
 
 def dirac_deltas_to_ttr(

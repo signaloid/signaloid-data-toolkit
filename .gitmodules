@@ -1,4 +1,0 @@
-[submodule "src/signaloid/benchmarking/assets"]
-	path = src/signaloid/benchmarking/assets
-	url = ../../signaloid/Signaloid-Demo-TemplateBuildAssets
-	branch = main
