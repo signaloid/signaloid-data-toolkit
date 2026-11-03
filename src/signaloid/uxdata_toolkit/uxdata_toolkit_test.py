@@ -22,8 +22,10 @@
 """Tests for signaloid-uxdata-toolkit CLI."""
 
 import argparse
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
@@ -95,9 +97,25 @@ class TestArgumentParsing(unittest.TestCase):
         args = toolkit.parse_arguments([])
         self.assertIsNone(args.command)
 
+    def test_plot_command_data_out(self) -> None:
+        args = toolkit.parse_arguments(["plot", "--data-out", "data.out"])
+        self.assertEqual(args.data_out, "data.out")
+        self.assertIsNone(args.ux_data)
+
     def test_plot_missing_ux_data(self) -> None:
         with self.assertRaises(SystemExit):
             toolkit.parse_arguments(["plot"])
+
+    def test_plot_ux_data_and_data_out_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            toolkit.parse_arguments(
+                [
+                    "plot",
+                    f"--ux-data={SAMPLE_UX_STRING}",
+                    "--data-out",
+                    "data.out",
+                ]
+            )
 
     def test_sample_missing_ux_data(self) -> None:
         with self.assertRaises(SystemExit):
@@ -130,6 +148,8 @@ class TestCommandPlot(unittest.TestCase):
         defaults: dict[str, object] = {
             "command": "plot",
             "ux_data": SAMPLE_UX_STRING,
+            # No "data_out": command_plot must still accept a Namespace built
+            # without it, as callers did before --data-out existed.
             "output": str(Path(tmp_dir) / "test_plot.png"),
         }
         defaults.update(overrides)
@@ -179,6 +199,58 @@ class TestCommandPlot(unittest.TestCase):
             toolkit.command_plot(args)
             self.assertTrue(Path(args.output).exists())
             self.assertGreater(Path(args.output).stat().st_size, 0)
+
+    def test_plot_with_data_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            np.random.seed(42)
+            samples = np.random.normal(0, 1, 1000)
+            data_out = Path(tmp_dir) / "data.out"
+            data_out.write_text(
+                "1234\n" + "".join(f"{s!r}\n" for s in samples.tolist()) + "inf\n"
+            )
+            args = self._make_plot_args(tmp_dir, ux_data=None, data_out=str(data_out))
+            with redirect_stdout(io.StringIO()) as stdout:
+                toolkit.command_plot(args)
+            self.assertIn("Number of samples: 1001 (1 non-finite)", stdout.getvalue())
+            self.assertTrue(Path(args.output).exists())
+            self.assertGreater(Path(args.output).stat().st_size, 0)
+
+    def test_plot_data_out_with_invalid_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_out = Path(tmp_dir) / "data.out"
+            data_out.write_text("1234\n1.0\nnot_a_sample\n")
+            args = self._make_plot_args(tmp_dir, ux_data=None, data_out=str(data_out))
+            with self.assertRaises(SystemExit):
+                toolkit.command_plot(args)
+            self.assertFalse(Path(args.output).exists())
+
+    def test_plot_data_out_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            args = self._make_plot_args(
+                tmp_dir,
+                ux_data=None,
+                data_out=str(Path(tmp_dir) / "missing.out"),
+            )
+            with redirect_stdout(io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit):
+                    toolkit.command_plot(args)
+            self.assertIn("No such file or directory", stdout.getvalue())
+            self.assertIn("Ensure the file holds", stdout.getvalue())
+
+    def test_plot_output_failure_does_not_blame_data_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_out = Path(tmp_dir) / "data.out"
+            data_out.write_text("1234\n1.0\n2.0\n3.0\n")
+            args = self._make_plot_args(
+                tmp_dir,
+                ux_data=None,
+                data_out=str(data_out),
+                output=str(Path(tmp_dir) / "missing_dir" / "plot.png"),
+            )
+            with redirect_stdout(io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit):
+                    toolkit.command_plot(args)
+            self.assertNotIn("Ensure the file holds", stdout.getvalue())
 
 
 # ============================================================================

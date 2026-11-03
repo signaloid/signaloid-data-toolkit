@@ -77,7 +77,8 @@ dist_value = DistributionalValue.parse(ux_string)
 plot(PlotData(dist_value))
 ```
 
-For plotting from raw samples, saving to a file, and the other `plot` options,
+For plotting from raw samples or a Monte Carlo `data.out` file, saving to a
+file, and the other `plot` options,
 see the package [README.md](https://github.com/signaloid/signaloid-data-toolkit/blob/main/src/signaloid/distributional_information_plotting/README.md).
 
 ### Sample from Ux Data

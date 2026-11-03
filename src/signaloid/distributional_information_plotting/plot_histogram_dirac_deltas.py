@@ -19,6 +19,7 @@
 #   DEALINGS IN THE SOFTWARE.
 
 
+import os
 import sys
 import math
 import functools
@@ -67,6 +68,42 @@ class PlotData:
     # width, so it is deliberately tiny: see `create_non_uniform_binning`.
     MIN_INTERIOR_WEIGHT: float = 1e-6
 
+    # Fewest Dirac deltas for which the extremal bins follow the detected shape of the
+    # tail (see `_tail_shape`). With fewer, the second threshold the shape is read from
+    # lies too close to the middle of the distribution to say anything about the tail.
+    MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION: int = 8
+
+    # Width of the outer bin of an extremal Dirac delta, as a multiple of the width of
+    # its inner bin, against the shape xi of a generalized Pareto tail. Each entry is a
+    # pair (xi, multiple), sorted by xi. Each multiple is the one that minimises the
+    # Wasserstein-1 distance between the two bins and the tail they hold, found
+    # numerically. A shape of -1 is a flat density, where the outer bin is as wide as
+    # the inner one. A shape of 0 is an exponential tail. A positive shape is a
+    # polynomial tail with index 1 / xi, e.g., a Student's t with 1 / xi degrees of
+    # freedom. The entries are sample points, not the only shapes handled.
+    # `_outer_width_ratio` interpolates between the two nearest entries, linearly in
+    # the logarithm of the multiple. Shapes below the first entry use the first
+    # multiple, and shapes above the last entry use the last multiple.
+    TAIL_SHAPE_TO_OUTER_WIDTH_RATIO: tuple[tuple[float, float], ...] = (
+        (-3.0, 0.44733198080314746),
+        (-2.0, 0.6215164160019556),
+        (-1.5, 0.768398464210621),
+        (-1.0, 1.0),
+        (-0.75, 1.1730897237926152),
+        (-0.5, 1.4130182735448464),
+        (-0.25, 1.7653697505547048),
+        (0.0, 2.32677724368277),
+        (0.1, 2.6546890960368854),
+        (0.2, 3.0792850281864066),
+        (0.3333333333333333, 3.8830289986968785),
+        (0.4, 4.4467760808977825),
+        (0.5, 5.634715822694777),
+        (0.6, 7.561898433223356),
+        (0.6666666666666666, 9.65402816971081),
+        (0.75, 14.305687112969494),
+        (0.8, 19.531687030587193),
+    )
+
     @classmethod
     def from_samples(
         cls,
@@ -90,6 +127,35 @@ class PlotData:
             A PlotData instance ready to be passed to plot().
         """
         dist = DistributionalValue.from_samples(samples)
+        return cls(dist, plotting_resolution=plotting_resolution)
+
+    @classmethod
+    def from_data_out(
+        cls,
+        path: str | os.PathLike[str],
+        plotting_resolution: int | None = None,
+    ) -> "PlotData":
+        """
+        Construct a PlotData from a Monte Carlo `data.out` file.
+
+        Reads the samples with `DistributionalValue.from_data_out()`, which
+        documents the file format, and then builds the plot data as
+        `from_samples()` does.
+
+        Args:
+            path: Path to the `data.out` file.
+            plotting_resolution: Number of bins for the plot (must be a
+                power of 2). If `None`, automatically determined from
+                the data.
+
+        Returns:
+            A PlotData instance ready to be passed to plot().
+
+        Raises:
+            OSError: If the file cannot be read.
+            ValueError: If the file does not hold valid samples.
+        """
+        dist = DistributionalValue.from_data_out(path)
         return cls(dist, plotting_resolution=plotting_resolution)
 
     @property
@@ -300,8 +366,12 @@ class PlotData:
         left: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Checking if (d/dx)^2 = 0 boundary condition has a solution.
-        If not, falling back to the boundary condition d/dx = 0.
+        Places the outer boundary of an extremal Dirac delta's two bins, keeping its
+        mass and its mean. From `MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION` Dirac deltas
+        up, the outer bin follows the shape of the tail detected by `_tail_shape`.
+        With fewer, the (d/dx)^2 = 0 boundary condition is tried. Otherwise, it falls
+        back to the boundary condition d/dx = 0, i.e., an outer bin as wide as the
+        inner one.
 
         Args:
             finite_sorted_dirac_deltas: The input Dirac deltas with finite and
@@ -322,7 +392,36 @@ class PlotData:
 
         w0 = None
         det: float = np.nan
-        if len(finite_sorted_dirac_deltas) >= 6:
+        if (
+            len(finite_sorted_dirac_deltas)
+            >= PlotData.MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION
+        ):
+            # Odd boundary positions are the Dirac deltas, even ones the thresholds.
+            if left:
+                tail_shape = PlotData._tail_shape(
+                    finite_sorted_dirac_deltas[0],
+                    finite_sorted_dirac_deltas[1],
+                    boundary_positions[2],
+                    boundary_positions[4],
+                    left,
+                )
+            else:
+                tail_shape = PlotData._tail_shape(
+                    finite_sorted_dirac_deltas[-1],
+                    finite_sorted_dirac_deltas[-2],
+                    boundary_positions[-3],
+                    boundary_positions[-5],
+                    left,
+                )
+            if tail_shape is not None:
+                w0 = (
+                    PlotData._outer_width_ratio(tail_shape)
+                    * bin_widths[1 if left else -2]
+                )
+        # The condition reads the bin on the far side of the adjacent Dirac delta,
+        # which the internal bins already hold from three Dirac deltas up. With two,
+        # that bin is the other extremal bin, which is not computed yet.
+        elif len(finite_sorted_dirac_deltas) >= 3:
             p0 = boundary_probabilities[1 if left else -2]
             w1 = bin_widths[1 if left else -2]
             w2 = bin_widths[2 if left else -3]
@@ -343,7 +442,10 @@ class PlotData:
                 elif any(roots_positive):
                     w0 = max(root1, root2)
 
-        if w0 is None or math.isinf(det) or math.isnan(det):
+            if math.isinf(det) or math.isnan(det):
+                w0 = None
+
+        if w0 is None:
             # The boundary condition d/dx = 0.
             boundary_positions[0 if left else -1] = boundary_positions[
                 1 if left else -2
@@ -352,7 +454,7 @@ class PlotData:
                 - boundary_positions[1 if left else -3]
             )
         else:
-            # The boundary condition (d/dx)^2 = 0.
+            # The detected tail, or the boundary condition (d/dx)^2 = 0.
             boundary_positions[0 if left else -1] = (
                 boundary_positions[1 if left else -2] + (-1 if left else 1) * w0
             )
@@ -376,6 +478,90 @@ class PlotData:
         )
 
         return (boundary_positions, bin_widths, bin_heights)
+
+    @staticmethod
+    def _tail_shape(
+        outer_dirac_delta: DiracDelta,
+        next_dirac_delta: DiracDelta,
+        outer_threshold: float,
+        next_threshold: float,
+        left: bool,
+    ) -> float | None:
+        """
+        Detects the shape of a tail from its two outermost Dirac deltas, as the shape
+        xi of a generalized Pareto tail. The tail beyond a threshold has a mean
+        excess, i.e., the mean distance of the tail from the threshold. The outer
+        Dirac delta gives it at the outer threshold, and the mean of the two Dirac
+        deltas gives it at the next threshold. For a generalized Pareto tail, the mean
+        excess is linear in the threshold with slope xi / (1 - xi), which this inverts.
+        A positive xi is a polynomial tail, zero an exponential tail, and a negative
+        xi a bounded one. For a valid TTR the thresholds are the TTR's own split
+        points, so the mean excesses are exact.
+
+        Args:
+            outer_dirac_delta: The extremal Dirac delta.
+            next_dirac_delta: Its neighbour.
+            outer_threshold: The bin boundary between the two Dirac deltas.
+            next_threshold: The bin boundary on the far side of the neighbour.
+            left: Whether the tail is the left one.
+        Returns:
+            The shape xi, or `None` when the positions do not describe a tail.
+        """
+
+        mass = outer_dirac_delta.mass + next_dirac_delta.mass
+        mean = (
+            outer_dirac_delta.mass * outer_dirac_delta.position
+            + next_dirac_delta.mass * next_dirac_delta.position
+        ) / mass
+        if left:
+            outer_excess = outer_threshold - outer_dirac_delta.position
+            next_excess = next_threshold - mean
+            distance = next_threshold - outer_threshold
+        else:
+            outer_excess = outer_dirac_delta.position - outer_threshold
+            next_excess = mean - next_threshold
+            distance = outer_threshold - next_threshold
+        if not (outer_excess > 0 and next_excess > 0 and distance > 0):
+            return None
+
+        slope = (outer_excess - next_excess) / distance
+        if slope <= -1:
+            # A mean excess that shrinks this fast is a support bounded right past
+            # the outer Dirac delta. That is the lowest shape the table holds.
+            return PlotData.TAIL_SHAPE_TO_OUTER_WIDTH_RATIO[0][0]
+
+        return slope / (1 + slope)
+
+    @staticmethod
+    def _outer_width_ratio(tail_shape: float) -> float:
+        """
+        Looks up the width of an extremal Dirac delta's outer bin, as a multiple of
+        the width of its inner bin, for a tail of the given shape. Interpolates
+        `TAIL_SHAPE_TO_OUTER_WIDTH_RATIO` linearly in the logarithm of the multiple.
+
+        Args:
+            tail_shape: The shape xi of the tail, from `_tail_shape`.
+        Returns:
+            The width of the outer bin over the width of the inner bin.
+        """
+
+        table = PlotData.TAIL_SHAPE_TO_OUTER_WIDTH_RATIO
+        if tail_shape <= table[0][0]:
+            return table[0][1]
+        if tail_shape >= table[-1][0]:
+            return table[-1][1]
+
+        for (low_shape, low_ratio), (high_shape, high_ratio) in zip(
+            table[:-1], table[1:]
+        ):
+            if tail_shape <= high_shape:
+                fraction = (tail_shape - low_shape) / (high_shape - low_shape)
+                return math.exp(
+                    (1 - fraction) * math.log(low_ratio)
+                    + fraction * math.log(high_ratio)
+                )
+
+        return table[-1][1]
 
     @staticmethod
     def _get_binning(
@@ -775,6 +961,82 @@ class PlotData:
         return (boundary_positions, bin_widths, bin_heights)
 
     @staticmethod
+    def _split_extremal_cells(
+        finite_sorted_dirac_deltas: list[DiracDelta],
+        boundary_positions: np.ndarray,
+        bin_heights: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Splits the bin of each extremal Dirac delta of a non-uniform binning into two
+        bins at the Dirac delta, whose outer bin follows the shape of the tail detected
+        by `_tail_shape`. The inner bin keeps its boundary with the neighbouring bin.
+        Both keep the Dirac delta's mass and its mean, the same way the two bins of a
+        Dirac delta in `create_binning` do. A tail whose shape cannot be detected keeps
+        its single bin, so the binning has up to two bins more than Dirac deltas.
+
+        Args:
+            finite_sorted_dirac_deltas: The Dirac deltas the binning was made from.
+            boundary_positions: The (N + 1) boundary positions of the binning.
+            bin_heights: The N bin heights of the binning.
+        Returns:
+            (boundary_positions, bin_heights): The boundary positions and bin heights
+                of the binning with its extremal bins split. Unchanged when the
+                binning does not have one bin per Dirac delta, which happens when
+                `create_non_uniform_binning` merged Dirac deltas.
+        """
+
+        if len(bin_heights) < 3 or len(bin_heights) != len(finite_sorted_dirac_deltas):
+            return (boundary_positions, bin_heights)
+
+        positions = list(boundary_positions)
+        heights = list(bin_heights)
+        for left in (True, False):
+            if left:
+                dirac_delta = finite_sorted_dirac_deltas[0]
+                tail_shape = PlotData._tail_shape(
+                    dirac_delta,
+                    finite_sorted_dirac_deltas[1],
+                    positions[1],
+                    positions[2],
+                    left,
+                )
+                inner_width = positions[1] - dirac_delta.position
+            else:
+                dirac_delta = finite_sorted_dirac_deltas[-1]
+                tail_shape = PlotData._tail_shape(
+                    dirac_delta,
+                    finite_sorted_dirac_deltas[-2],
+                    positions[-2],
+                    positions[-3],
+                    left,
+                )
+                inner_width = dirac_delta.position - positions[-2]
+            if tail_shape is None or not inner_width > 0:
+                continue
+
+            outer_width = PlotData._outer_width_ratio(tail_shape) * inner_width
+            average_height = dirac_delta.mass / (outer_width + inner_width)
+            outer_height = average_height * inner_width / outer_width
+            inner_height = average_height * outer_width / inner_width
+            if left:
+                positions = [
+                    dirac_delta.position - outer_width,
+                    dirac_delta.position,
+                ] + positions[1:]
+                heights = [outer_height, inner_height] + heights[1:]
+            else:
+                positions = positions[:-1] + [
+                    dirac_delta.position,
+                    dirac_delta.position + outer_width,
+                ]
+                heights = heights[:-1] + [inner_height, outer_height]
+
+        return (
+            np.array(positions, dtype=np.float64),
+            np.array(heights, dtype=np.float64),
+        )
+
+    @staticmethod
     def _bin_pdf_expected_dirac_delta(
         boundary_positions: np.ndarray, bin_widths: np.ndarray, bin_heights: np.ndarray
     ) -> DiracDelta:
@@ -969,7 +1231,8 @@ class PlotData:
                 pass
 
         # For non-TTR input, use the non-uniform binning instead, which places one bin per Dirac delta with boundaries
-        # following the spacing of the Dirac deltas. This reads the input as a
+        # following the spacing of the Dirac deltas, and two for each extremal Dirac
+        # delta when there are enough to detect the tails. This reads the input as a
         # continuous distribution with no gaps in its support, whereas a
         # uniform-width histogram leaves empty bins wherever the Dirac deltas are
         # sparser than the bin width.
@@ -1010,6 +1273,13 @@ class PlotData:
         boundary_positions, bin_widths, bin_heights = (
             PlotData.create_non_uniform_binning(finite_dirac_deltas)
         )
+
+        # A single bin centred on an extremal Dirac delta is a flat tail. From enough
+        # Dirac deltas to detect the shape of the tail, follow it with two bins.
+        if len(finite_dirac_deltas) >= PlotData.MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION:
+            boundary_positions, bin_heights = PlotData._split_extremal_cells(
+                finite_dirac_deltas, boundary_positions, bin_heights
+            )
 
         self.positions = boundary_positions
         self.masses = bin_heights

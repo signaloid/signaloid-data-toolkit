@@ -45,6 +45,20 @@ plot(plot_data, path="output.png", save=True)
 
 Non-finite values (`NaN`, `-Inf`, `+Inf`) in the samples array are automatically separated and displayed in a dedicated special-values panel alongside the main histogram.
 
+## Plotting a Monte Carlo `data.out` file
+
+A `data.out` file, as written by `saveMonteCarloFloatDataToDataDotOutFile` or `saveMonteCarloDoubleDataToDataDotOutFile` in [Signaloid-Demo-CommonUtilityRoutines/common.c](https://github.com/signaloid/Signaloid-Demo-CommonUtilityRoutines/blob/main/common.c), holds the run's CPU time in microseconds on its first line, then one unweighted Monte Carlo sample per line. Use `PlotData.from_data_out()` to plot it directly. It skips the first line and blank lines, and raises `ValueError` if any other line is not a single float (`nan`, `inf` and `-inf` are accepted):
+
+```python
+from signaloid.distributional_information_plotting.plot_histogram_dirac_deltas import PlotData
+from signaloid.distributional_information_plotting.plot_wrapper import plot
+
+plot_data = PlotData.from_data_out("data.out")
+plot(plot_data, path="output.png", save=True)
+```
+
+It also raises `ValueError` if the first line is not an integer, which catches a file that lacks it (such as the output of `signaloid-uxdata-toolkit sample -o`), or if the last line has no newline, which catches a file cut off mid-line. A file cut off exactly at the end of a line cannot be detected. Files from the `...MultidimensionalDataToDataDotOutFile` writers, which put comma-separated samples of several variables on each line, are not supported. To get the samples as a `DistributionalValue` without building a plot, use `DistributionalValue.from_data_out()`.
+
 ## Customizing the plot
 
 The `plot()` function accepts several optional parameters:
@@ -88,6 +102,9 @@ signaloid-uxdata-toolkit plot --ux-data=0.40007Ux0000000000000000013FD99AC12423C
 
 # Save plot to file
 signaloid-uxdata-toolkit plot -o output.png --ux-data=0.40007Ux...
+
+# Plot the Monte Carlo samples in a data.out file
+signaloid-uxdata-toolkit plot -o output.png --data-out=data.out
 
 # Generate samples
 signaloid-uxdata-toolkit sample --ux-data=0.40007Ux... --num-samples 100
