@@ -19,7 +19,7 @@ jobs:
         args:
           - host: ubuntu-26.04
           - host: macos-14
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
 
     runs-on:  ${{ matrix.args.host }}
 

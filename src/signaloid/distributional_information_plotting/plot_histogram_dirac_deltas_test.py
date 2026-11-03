@@ -22,6 +22,7 @@
 import math
 import os
 import random
+import tempfile
 import unittest
 
 import numpy as np
@@ -161,6 +162,129 @@ class TestCreateBinning(unittest.TestCase):
                     abs(input_ttr_dd.position - binning_ttr_dd.position),
                     position_threshold,
                 )
+
+    def test_create_binning_extremal_bins_follow_a_decaying_tail(self) -> None:
+        """
+        Tests that for four Dirac deltas the extremal bins use the (d/dx)^2 = 0
+        boundary condition rather than the d/dx = 0 one. The input is the exact
+        order-2 TTR of a standard normal, whose tails decay. The d/dx = 0 condition
+        would make the outer bin of each extremal Dirac delta as wide as its inner
+        bin. Following the decaying tail makes it wider.
+        """
+        inner_split = math.sqrt(2 / math.pi)
+        density_at_zero = 1 / math.sqrt(2 * math.pi)
+        density_at_split = density_at_zero * math.exp(-inner_split * inner_split / 2)
+        outer_mass = 0.5 * (1 + math.erf(-inner_split / math.sqrt(2)))
+        inner_mass = 0.5 - outer_mass
+        outer_position = -density_at_split / outer_mass
+        inner_position = -(density_at_zero - density_at_split) / inner_mass
+        input_ttr = [
+            DiracDelta(outer_position, mass=outer_mass),
+            DiracDelta(inner_position, mass=inner_mass),
+            DiracDelta(-inner_position, mass=inner_mass),
+            DiracDelta(-outer_position, mass=outer_mass),
+        ]
+
+        boundary_positions, bin_widths, bin_heights = PlotData.create_binning(
+            input_ttr, 2, True
+        )
+
+        self.assertGreater(bin_widths[0], 1.5 * bin_widths[1])
+        self.assertGreater(bin_widths[-1], 1.5 * bin_widths[-2])
+        self.assertAlmostEqual(
+            float(bin_widths[0] * bin_heights[0] + bin_widths[1] * bin_heights[1]),
+            outer_mass,
+            places=12,
+        )
+        self.assertAlmostEqual(float(np.sum(bin_widths * bin_heights)), 1.0, places=12)
+
+    def test_create_binning_extremal_bins_follow_the_detected_tail(self) -> None:
+        """
+        Tests that from eight Dirac deltas the shape of a tail is detected exactly
+        from a valid TTR, and that the outer bin then takes the width the shape calls
+        for. The inputs are the exact order-3 TTRs of a unit exponential (right tail
+        of shape 0), of a Pareto with index 3 (right tail of shape 1/3, a polynomial
+        tail), and of a uniform on [0, 1] (both tails of shape -1, a flat density
+        where the outer bin is as wide as the inner one).
+        """
+
+        def ttr(
+            mass_and_moment, low: float, high: float, order: int
+        ) -> list[DiracDelta]:
+            mass, moment = mass_and_moment(low, high)
+            mean = moment / mass
+            if order == 0:
+                return [DiracDelta(mean, mass=mass)]
+            return ttr(mass_and_moment, low, mean, order - 1) + ttr(
+                mass_and_moment, mean, high, order - 1
+            )
+
+        def exponential(low: float, high: float) -> tuple[float, float]:
+            if high == math.inf:
+                return (math.exp(-low), (low + 1) * math.exp(-low))
+            return (
+                math.exp(-low) - math.exp(-high),
+                (low + 1) * math.exp(-low) - (high + 1) * math.exp(-high),
+            )
+
+        def pareto(low: float, high: float) -> tuple[float, float]:
+            if high == math.inf:
+                return (low**-3, 1.5 * low**-2)
+            return (low**-3 - high**-3, 1.5 * (low**-2 - high**-2))
+
+        def uniform(low: float, high: float) -> tuple[float, float]:
+            return (high - low, (high * high - low * low) / 2)
+
+        cases = (
+            ("exponential", ttr(exponential, 0.0, math.inf, 3), None, 0.0),
+            ("pareto", ttr(pareto, 1.0, math.inf, 3), None, 1 / 3),
+            ("uniform", ttr(uniform, 0.0, 1.0, 3), -1.0, -1.0),
+        )
+        for name, input_ttr, left_shape, right_shape in cases:
+            with self.subTest(distribution=name):
+                boundary_positions, bin_widths, bin_heights = PlotData.create_binning(
+                    input_ttr, 3, True
+                )
+
+                detected_right_shape = PlotData._tail_shape(
+                    input_ttr[-1],
+                    input_ttr[-2],
+                    boundary_positions[-3],
+                    boundary_positions[-5],
+                    False,
+                )
+                assert detected_right_shape is not None
+                self.assertAlmostEqual(detected_right_shape, right_shape, places=9)
+                self.assertAlmostEqual(
+                    float(bin_widths[-1] / bin_widths[-2]),
+                    PlotData._outer_width_ratio(right_shape),
+                    places=6,
+                )
+                if left_shape is not None:
+                    self.assertAlmostEqual(
+                        float(bin_widths[0] / bin_widths[1]),
+                        PlotData._outer_width_ratio(left_shape),
+                        places=6,
+                    )
+
+                self.assertAlmostEqual(
+                    float(
+                        bin_widths[-2] * bin_heights[-2]
+                        + bin_widths[-1] * bin_heights[-1]
+                    ),
+                    input_ttr[-1].mass,
+                    places=12,
+                )
+                self.assertAlmostEqual(
+                    float(np.sum(bin_widths * bin_heights)), 1.0, places=12
+                )
+
+        # A polynomial tail calls for a wider outer bin than an exponential one, and a
+        # flat density for one as wide as the inner bin.
+        self.assertGreater(
+            PlotData._outer_width_ratio(1 / 3), PlotData._outer_width_ratio(0.0)
+        )
+        self.assertEqual(PlotData._outer_width_ratio(-1.0), 1.0)
 
 
 class TestCreateBinningGuards(unittest.TestCase):
@@ -735,6 +859,94 @@ class TestPlotDataFromSamples(unittest.TestCase):
         self.assertTrue(result)
 
 
+class TestPlotDataFromDataOut(unittest.TestCase):
+    """Tests for PlotData.from_data_out() (reads a Monte Carlo data.out file)."""
+
+    def _write_data_out(self, tmp_dir: str, contents: str) -> str:
+        path = os.path.join(tmp_dir, "data.out")
+        with open(path, "w") as file:
+            file.write(contents)
+        return path
+
+    def test_first_line_is_not_a_sample(self) -> None:
+        """The first line should be skipped even when it parses as a float."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_data_out(tmp_dir, "1000\n1.0\n2.0\n3.0\n4.0\n")
+            pd = PlotData.from_data_out(path)
+
+        # Reading the first line as a sample would give a mean of 202.
+        assert pd.dist.mean is not None
+        self.assertAlmostEqual(pd.dist.mean, 2.5)
+
+    def test_matches_from_samples(self) -> None:
+        """The samples after the first line should plot as from_samples does."""
+        np.random.seed(42)
+        samples = np.random.normal(0, 1, 1000)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_data_out(
+                tmp_dir,
+                "1234\n" + "".join(f"{s!r}\n" for s in samples.tolist()),
+            )
+            from_data_out = PlotData.from_data_out(path, plotting_resolution=32)
+
+        from_samples = PlotData.from_samples(samples, plotting_resolution=32)
+        np.testing.assert_array_equal(from_data_out.positions, from_samples.positions)
+        np.testing.assert_array_equal(from_data_out.masses, from_samples.masses)
+
+    def test_blank_lines_are_ignored(self) -> None:
+        """Blank lines, such as a trailing one, should not count as samples."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_data_out(tmp_dir, "1234\n1.0\n\n3.0\n  \n\n")
+            pd = PlotData.from_data_out(path)
+
+        assert pd.dist.mean is not None
+        self.assertAlmostEqual(pd.dist.mean, 2.0)
+
+    def test_special_value_masses(self) -> None:
+        """nan, -inf and inf lines should be read as special values."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_data_out(tmp_dir, "1234\n1.0\n2.0\n-nan\n-inf\ninf\n")
+            pd = PlotData.from_data_out(path)
+
+        self.assertTrue(pd.dist.has_special_values)
+        self.assertAlmostEqual(pd.dist.nan_dirac_delta.mass, 1 / 5)
+        self.assertAlmostEqual(pd.dist.neg_inf_dirac_delta.mass, 1 / 5)
+        self.assertAlmostEqual(pd.dist.pos_inf_dirac_delta.mass, 1 / 5)
+
+    def test_non_float_line_raises_with_line_number(self) -> None:
+        """A line after the first that is not a float should raise ValueError."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_data_out(tmp_dir, "1234\n1.0\n2.0 3.0\n")
+            with self.assertRaisesRegex(ValueError, r"data\.out:3: .*'2\.0 3\.0'"):
+                PlotData.from_data_out(path)
+
+    def test_no_samples_raises(self) -> None:
+        """A file holding only its first line should raise ValueError."""
+        for contents in ["1234\n", "1234\n\n"]:
+            with self.subTest(contents=contents):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    path = self._write_data_out(tmp_dir, contents)
+                    with self.assertRaisesRegex(ValueError, "no samples"):
+                        PlotData.from_data_out(path)
+
+    def test_missing_cpu_time_line_raises(self) -> None:
+        """A first line that is not an integer CPU time should raise ValueError."""
+        # The output of `sample -o` (np.savetxt) has no CPU time line.
+        for contents in ["", "1.000000000000000000e+00\n2.0\n", "0.5\n2.0\n"]:
+            with self.subTest(contents=contents):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    path = self._write_data_out(tmp_dir, contents)
+                    with self.assertRaisesRegex(ValueError, r"data\.out:1: .*CPU"):
+                        PlotData.from_data_out(path)
+
+    def test_truncated_last_line_raises(self) -> None:
+        """A last line with no newline should raise ValueError."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self._write_data_out(tmp_dir, "1234\n0.12345678\n0.12")
+            with self.assertRaisesRegex(ValueError, r"data\.out:3: .*truncated"):
+                PlotData.from_data_out(path)
+
+
 class TestNonTTRBinningFallback(unittest.TestCase):
     """Covers the non-uniform binning fallback used when `is_full_valid_TTR`
     is False or the TTR pipeline raises."""
@@ -745,17 +957,23 @@ class TestNonTTRBinningFallback(unittest.TestCase):
         return os.path.join(here, name)
 
     def _assert_gap_free_density(self, pd: PlotData, dist: DistributionalValue) -> None:
-        """The fallback binning has one bin per Dirac delta, holds no empty bins,
-        and preserves the total mass and the mean of the input exactly. Call this
-        after constructing the `PlotData`, which cures the `DistributionalValue`."""
+        """The fallback binning has one bin per Dirac delta, plus one for each tail
+        whose shape is detected from `MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION` Dirac
+        deltas up, holds no empty bins, and preserves the total mass and the mean of
+        the input exactly. Call this after constructing the `PlotData`, which cures
+        the `DistributionalValue`."""
         self.assertIsNotNone(pd.plotting_resolution)
         assert pd.plotting_resolution is not None
         assert pd.plotting_ttr_order is not None
-        expected_number_of_bins = min(
+        number_of_dirac_deltas = min(
             len(dist.finite_dirac_deltas), 2**pd.plotting_ttr_order
         )
-        self.assertEqual(len(pd.positions), expected_number_of_bins + 1)
-        self.assertEqual(len(pd.masses), expected_number_of_bins)
+        number_of_tail_bins = len(pd.masses) - number_of_dirac_deltas
+        if number_of_dirac_deltas < PlotData.MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION:
+            self.assertEqual(number_of_tail_bins, 0)
+        else:
+            self.assertIn(number_of_tail_bins, (0, 1, 2))
+        self.assertEqual(len(pd.positions), len(pd.masses) + 1)
 
         widths = pd.positions[1:] - pd.positions[:-1]
         self.assertTrue(np.all(widths > 0))
@@ -812,7 +1030,15 @@ class TestNonTTRBinningFallback(unittest.TestCase):
         pd = PlotData.from_samples(rng.normal(3.0, 1.5, 5000))
 
         assert pd.plotting_ttr_order is not None
-        self.assertEqual(len(pd.masses), 2**pd.plotting_ttr_order)
+        number_of_dirac_deltas = 2**pd.plotting_ttr_order
+        self.assertIn(
+            len(pd.masses),
+            (
+                number_of_dirac_deltas,
+                number_of_dirac_deltas + 1,
+                number_of_dirac_deltas + 2,
+            ),
+        )
         self._assert_gap_free_density(pd, pd.dist)
 
     def test_non_uniform_binning_leaves_no_gaps_where_uniform_would(self) -> None:
@@ -834,6 +1060,42 @@ class TestNonTTRBinningFallback(unittest.TestCase):
         self.assertGreater(int(np.sum(uniform_counts == 0)), 0)
 
         self._assert_gap_free_density(pd, dist)
+
+    def test_extremal_dirac_deltas_get_two_bins_that_keep_their_mass_and_mean(
+        self,
+    ) -> None:
+        """From `MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION` Dirac deltas, the bin of each
+        extremal Dirac delta is split at the Dirac delta into two bins that follow
+        the detected tail. Together they keep the Dirac delta's mass and mean, and
+        the inner one keeps its boundary with the neighbouring bin."""
+        positions = np.exp(np.linspace(-2.0, 2.5, 16))
+        masses = np.full(16, 1.0 / 16)
+        dist = DistributionalValue.from_weighted_samples(positions, masses)
+        self.assertFalse(dist.is_full_valid_TTR)
+
+        pd = PlotData(dist)
+
+        self.assertEqual(len(pd.masses), 18)
+        unsplit_boundaries, _, _ = PlotData.create_non_uniform_binning(
+            dist.finite_dirac_deltas
+        )
+        self.assertEqual(pd.positions[2], unsplit_boundaries[1])
+        self.assertEqual(pd.positions[-3], unsplit_boundaries[-2])
+
+        widths = pd.positions[1:] - pd.positions[:-1]
+        for outer, inner, position in ((0, 1, positions[0]), (-1, -2, positions[-1])):
+            outer_mass = widths[outer] * pd.masses[outer]
+            inner_mass = widths[inner] * pd.masses[inner]
+            centres = (pd.positions[1:] + pd.positions[:-1]) / 2
+            self.assertAlmostEqual(float(outer_mass + inner_mass), 1.0 / 16, places=12)
+            self.assertAlmostEqual(
+                float(
+                    (outer_mass * centres[outer] + inner_mass * centres[inner])
+                    / (outer_mass + inner_mass)
+                ),
+                float(position),
+                places=9,
+            )
 
 
 class TestNearCoincidentDiracDeltas(unittest.TestCase):

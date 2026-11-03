@@ -20,6 +20,7 @@
 
 
 import math
+import os
 import sys
 import re
 import struct
@@ -574,6 +575,72 @@ class DistributionalValue:
 
         dist = cls(dirac_deltas=dirac_deltas)
         return dist
+
+    @classmethod
+    def from_data_out(cls, path: str | os.PathLike[str]) -> "DistributionalValue":
+        """
+        Construct a DistributionalValue from a Monte Carlo `data.out` file.
+
+        A `data.out` file, as written by `saveMonteCarloFloatDataToDataDotOutFile`
+        or `saveMonteCarloDoubleDataToDataDotOutFile` in
+        https://github.com/signaloid/Signaloid-Demo-CommonUtilityRoutines/blob/main/common.c,
+        holds the run's CPU time in microseconds (an unsigned integer) on its
+        first line, then one unweighted Monte Carlo sample per line, every line
+        ending in a newline. The first line is skipped, blank lines are
+        ignored, and every other line must be a single float (`nan`, `inf` and
+        `-inf` included). The `...MultidimensionalDataToDataDotOutFile`
+        writers put comma-separated samples of several variables on each line,
+        which is not supported.
+
+        A first line that is not an integer means the file lacks it (for
+        example, the output of `signaloid-uxdata-toolkit sample -o`), and a
+        last line with no newline means the file was cut off mid-line; both
+        raise. A file cut off exactly at the end of a line cannot be detected.
+
+        Args:
+            path: Path to the `data.out` file.
+
+        Returns:
+            A DistributionalValue with one equal-mass Dirac delta per sample.
+
+        Raises:
+            OSError: If the file cannot be read.
+            UnicodeDecodeError: If the file is not UTF-8 text.
+            ValueError: If the first line is not an integer, a line after it
+                is not a float, the last line has no newline, or the file
+                holds no samples after its first line.
+        """
+        samples: list[float] = []
+        with open(path, "r", encoding="utf-8") as file:
+            # The first line is the CPU time in microseconds, not a sample.
+            cpu_time = file.readline().strip()
+            if not cpu_time.isdecimal():
+                raise ValueError(
+                    f"{path}:1: expected the CPU time in microseconds, got "
+                    f"{cpu_time!r}; the file may be missing its first line"
+                )
+            for line_number, line in enumerate(file, start=2):
+                # The writer ends every line, the last included, in a newline.
+                if not line.endswith("\n"):
+                    raise ValueError(
+                        f"{path}:{line_number}: last line has no newline, so "
+                        f"the file looks truncated"
+                    )
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    samples.append(float(line))
+                except ValueError:
+                    raise ValueError(
+                        f"{path}:{line_number}: expected one float sample per "
+                        f"line, got {line!r}"
+                    ) from None
+
+        if not samples:
+            raise ValueError(f"{path} holds no samples after its first line.")
+
+        return cls.from_samples(samples)
 
     @classmethod
     def from_weighted_samples(

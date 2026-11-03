@@ -454,7 +454,8 @@ def binned_wasserstein_1_uxhw_wrapper(
     # `PlotData` has already selected the binning that suits this input:
     # the TTR binning route when the value is a full valid TTR, and the
     # non-uniform binning (one bin per Dirac delta, boundaries following the
-    # Dirac spacing) when it is not. Recomputing the TTR route here
+    # Dirac spacing, and two bins following the tail for each extremal Dirac
+    # delta) when it is not. Recomputing the TTR route here
     # unconditionally would bin a non-TTR value as though it were a TTR,
     # which is exactly what `_construct_plot_data` avoids, and would leave
     # the measured distance disagreeing with the plotted distribution.

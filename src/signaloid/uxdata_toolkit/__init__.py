@@ -142,14 +142,15 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
 def command_plot_parser(command_subparsers: Any) -> None:
     plot_parser = command_subparsers.add_parser(
         "plot",
-        help="Plot Signaloid Ux Data distributional data",
-        description="Plot Signaloid Ux Data distributional data",
+        help="Plot Signaloid Ux Data or Monte Carlo samples",
+        description="Plot Signaloid Ux Data or Monte Carlo samples",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:
   %(prog)s --ux-data=0.40007Ux0000000000000000013FD99AC12423C7C7000000013FD99AC12423C7C78000000000000000
   %(prog)s --ux-data=09168733bf9ad93f000100000000000000c7c72324c19ad93f01000000c7c72324c19ad93f0000000000000080
   %(prog)s -o output.png --ux-data=0.40007Ux0000000000000000013FD99AC12423C7C7000000013FD99AC12423C7C78000000000000000
+  %(prog)s -o output.png --data-out=data.out
         """,
     )
 
@@ -160,31 +161,89 @@ Example:
         help="Output PNG filename (if not specified, displays plot interactively)",
     )
 
-    plot_parser.add_argument(
+    plot_input = plot_parser.add_mutually_exclusive_group(required=True)
+
+    plot_input.add_argument(
         "--ux-data",
         type=str,
-        required=True,
         help='Ux String or Ux Binary to plot (e.g., "90.6Ux04000000...")',
+    )
+
+    plot_input.add_argument(
+        "--data-out",
+        type=str,
+        metavar="PATH",
+        help=(
+            "Monte Carlo data.out file to plot: the CPU time in microseconds "
+            "on the first line, then one unweighted sample per line"
+        ),
     )
 
     plot_parser.set_defaults(func=command_plot)
 
 
+def _load_data_out(path: str) -> PlotData:
+    """Load and print info for the Monte Carlo samples in a data.out file.
+
+    Args:
+        path: Path to the data.out file.
+
+    Returns:
+        The PlotData built from the file's samples.
+
+    Raises:
+        OSError: If the file cannot be read.
+        ValueError: If the file does not hold valid samples.
+    """
+    dist_value = DistributionalValue.from_data_out(path)
+
+    # One Dirac delta per sample, until PlotData merges them.
+    positions = dist_value.positions
+    print(f"Loaded Monte Carlo samples from: {path}")
+    print(
+        f"Number of samples: {positions.size} "
+        f"({np.count_nonzero(~np.isfinite(positions))} non-finite)"
+    )
+    print(f"Mean: {dist_value.mean}")
+    try:
+        print(f"Variance: {dist_value.variance}")
+    except OverflowError:
+        print("Variance: unavailable (floating-point overflow)")
+
+    return PlotData(dist_value)
+
+
 def command_plot(args: argparse.Namespace) -> None:
-    """Plot a Signaloid Ux Data distributional value.
+    """Plot a Signaloid Ux Data distributional value or a Monte Carlo data.out file.
 
     Example usage:
         signaloid-uxdata-toolkit plot --ux-data=0.40007Ux000...
         signaloid-uxdata-toolkit plot -o output.png --ux-data=0.40007Ux000...
+        signaloid-uxdata-toolkit plot -o output.png --data-out=data.out
     """
     print("Signaloid Ux Data Plotter")
     print("=" * 50)
 
-    try:
-        dist_value = _parse_ux_data(args.ux_data)
+    data_out = getattr(args, "data_out", None)
+    if data_out is not None:
+        source = data_out
+        hint = (
+            "Ensure the file holds the CPU time in microseconds on its first "
+            "line, then one sample per line."
+        )
+    else:
+        source = "Ux Data"
+        hint = "Ensure the input has a valid Ux Data format."
 
-        # Create PlotData object from the distributional value
-        plot_data = PlotData(dist_value)
+    plot_data: PlotData | None = None
+    try:
+        if data_out is not None:
+            plot_data = _load_data_out(data_out)
+        else:
+            dist_value = _parse_ux_data(args.ux_data)
+
+            # Create PlotData object from the distributional value
+            plot_data = PlotData(dist_value)
 
         # Plot the distribution using the plot wrapper function
         print("Generating plot...")
@@ -196,9 +255,11 @@ def command_plot(args: argparse.Namespace) -> None:
             plot(plot_data, path=args.output, save=True)
 
     except Exception as e:
-        print(f"\nError parsing or plotting Ux Data: {e}")
+        print(f"\nError parsing or plotting {source}: {e}")
         traceback.print_exc()
-        print("\nEnsure the input has a valid Ux Data format.")
+        # Only point at the input when it is what failed, not the plotting.
+        if plot_data is None:
+            print(f"\n{hint}")
         sys.exit(1)
 
 
