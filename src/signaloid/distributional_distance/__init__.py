@@ -18,7 +18,7 @@
 #   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 #   DEALINGS IN THE SOFTWARE.
 
-"""Pure-NumPy distance utilities for DistributionalValue comparisons.
+"""NumPy and SciPy distance utilities for DistributionalValue comparisons.
 
 Modules:
 - wasserstein: Wasserstein-1 / Wasserstein-2 (+ normalised variants),

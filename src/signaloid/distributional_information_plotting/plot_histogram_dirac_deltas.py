@@ -257,7 +257,8 @@ class PlotData:
 
     @staticmethod
     def _determine_boundary_positions(
-        finite_sorted_dirac_deltas: list[DiracDelta],
+        positions: np.ndarray,
+        masses: np.ndarray,
         exponent: int,
         use_ttr_binning: bool,
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -270,9 +271,10 @@ class PlotData:
         looking at the adjacent Dirac deltas.
 
         Args:
-            finite_sorted_dirac_deltas: The input Dirac deltas with finite and
-                sorted positions. At least two are required, since the extremal
-                boundaries are placed relative to an adjacent Dirac delta.
+            positions: The finite and sorted positions of the input Dirac deltas.
+                At least two are required, since the extremal boundaries are
+                placed relative to an adjacent Dirac delta.
+            masses: The masses of the input Dirac deltas.
             exponent: The TTR order, i.e., the base-2 logarithm of the number of
                 Dirac deltas in the TTR. The number of bins in the output binning
                 is twice the number of Dirac deltas in the TTR.
@@ -280,11 +282,12 @@ class PlotData:
         Returns:
             (boundary_positions, boundary_probabilities): The internal boundary positions
                 and boundary probabilities that are intermediaries to get a binning.
+                The odd entries are the positions and masses of the Dirac deltas.
         Raises:
             ValueError: When given fewer than two Dirac deltas.
         """
 
-        number_of_finite_dirac_deltas = len(finite_sorted_dirac_deltas)
+        number_of_finite_dirac_deltas = len(positions)
         if number_of_finite_dirac_deltas < 2:
             raise ValueError(
                 "plot_histogram_dirac_deltas: _determine_boundary_positions requires "
@@ -292,10 +295,10 @@ class PlotData:
             )
 
         number_of_boundaries = 2 * number_of_finite_dirac_deltas + 1
-        boundary_positions = np.array([np.nan] * number_of_boundaries)
-        boundary_probabilities = np.array([np.nan] * number_of_boundaries)
-        boundary_positions[1::2] = [dd.position for dd in finite_sorted_dirac_deltas]
-        boundary_probabilities[1::2] = [dd.mass for dd in finite_sorted_dirac_deltas]
+        boundary_positions = np.full(number_of_boundaries, np.nan)
+        boundary_probabilities = np.full(number_of_boundaries, np.nan)
+        boundary_positions[1::2] = positions
+        boundary_probabilities[1::2] = masses
 
         if not use_ttr_binning:
             # Determine the 'NaN'-valued boundary points from adjacent Dirac deltas.
@@ -358,7 +361,6 @@ class PlotData:
 
     @staticmethod
     def _handle_extremal_bins(
-        finite_sorted_dirac_deltas: list[DiracDelta],
         boundary_positions: np.ndarray,
         boundary_probabilities: np.ndarray,
         bin_widths: np.ndarray,
@@ -374,12 +376,12 @@ class PlotData:
         inner one.
 
         Args:
-            finite_sorted_dirac_deltas: The input Dirac deltas with finite and
-                sorted positions.
             boundary_positions: The internal boundary positions that are
-                intermediaries to get a binning.
+                intermediaries to get a binning, from `_determine_boundary_positions`.
+                Their odd entries are the positions of the Dirac deltas.
             boundary_probabilities: The internal boundary probabilities that are
-                intermediaries to get a binning.
+                intermediaries to get a binning. Their odd entries are the masses of
+                the Dirac deltas.
             bin_widths: The internal bin widths that are intermediaries to get
                 a binning.
             bin_heights:The internal bin heights that are intermediaries to get
@@ -390,25 +392,31 @@ class PlotData:
                 bin widths, and bin heights that describe the output binning.
         """
 
+        number_of_finite_dirac_deltas = (len(boundary_positions) - 1) // 2
         w0 = None
         det: float = np.nan
         if (
-            len(finite_sorted_dirac_deltas)
+            number_of_finite_dirac_deltas
             >= PlotData.MIN_DIRAC_DELTAS_FOR_TAIL_DETECTION
         ):
-            # Odd boundary positions are the Dirac deltas, even ones the thresholds.
+            # Odd boundary positions and probabilities are the positions and masses
+            # of the Dirac deltas, and even boundary positions the thresholds.
             if left:
                 tail_shape = PlotData._tail_shape(
-                    finite_sorted_dirac_deltas[0],
-                    finite_sorted_dirac_deltas[1],
+                    float(boundary_positions[1]),
+                    float(boundary_probabilities[1]),
+                    float(boundary_positions[3]),
+                    float(boundary_probabilities[3]),
                     boundary_positions[2],
                     boundary_positions[4],
                     left,
                 )
             else:
                 tail_shape = PlotData._tail_shape(
-                    finite_sorted_dirac_deltas[-1],
-                    finite_sorted_dirac_deltas[-2],
+                    float(boundary_positions[-2]),
+                    float(boundary_probabilities[-2]),
+                    float(boundary_positions[-4]),
+                    float(boundary_probabilities[-4]),
                     boundary_positions[-3],
                     boundary_positions[-5],
                     left,
@@ -421,7 +429,7 @@ class PlotData:
         # The condition reads the bin on the far side of the adjacent Dirac delta,
         # which the internal bins already hold from three Dirac deltas up. With two,
         # that bin is the other extremal bin, which is not computed yet.
-        elif len(finite_sorted_dirac_deltas) >= 3:
+        elif number_of_finite_dirac_deltas >= 3:
             p0 = boundary_probabilities[1 if left else -2]
             w1 = bin_widths[1 if left else -2]
             w2 = bin_widths[2 if left else -3]
@@ -463,7 +471,7 @@ class PlotData:
             boundary_positions[1 if left else -1]
             - boundary_positions[0 if left else -2]
         )
-        averageHeight = finite_sorted_dirac_deltas[0 if left else -1].mass / (
+        averageHeight = boundary_probabilities[1 if left else -2] / (
             bin_widths[0 if left else -1] + bin_widths[1 if left else -2]
         )
         bin_heights[0 if left else -1] = (
@@ -481,8 +489,10 @@ class PlotData:
 
     @staticmethod
     def _tail_shape(
-        outer_dirac_delta: DiracDelta,
-        next_dirac_delta: DiracDelta,
+        outer_position: float,
+        outer_mass: float,
+        next_position: float,
+        next_mass: float,
         outer_threshold: float,
         next_threshold: float,
         left: bool,
@@ -499,8 +509,10 @@ class PlotData:
         points, so the mean excesses are exact.
 
         Args:
-            outer_dirac_delta: The extremal Dirac delta.
-            next_dirac_delta: Its neighbour.
+            outer_position: The position of the extremal Dirac delta.
+            outer_mass: Its mass.
+            next_position: The position of its neighbour.
+            next_mass: Its neighbour's mass.
             outer_threshold: The bin boundary between the two Dirac deltas.
             next_threshold: The bin boundary on the far side of the neighbour.
             left: Whether the tail is the left one.
@@ -508,17 +520,14 @@ class PlotData:
             The shape xi, or `None` when the positions do not describe a tail.
         """
 
-        mass = outer_dirac_delta.mass + next_dirac_delta.mass
-        mean = (
-            outer_dirac_delta.mass * outer_dirac_delta.position
-            + next_dirac_delta.mass * next_dirac_delta.position
-        ) / mass
+        mass = outer_mass + next_mass
+        mean = (outer_mass * outer_position + next_mass * next_position) / mass
         if left:
-            outer_excess = outer_threshold - outer_dirac_delta.position
+            outer_excess = outer_threshold - outer_position
             next_excess = next_threshold - mean
             distance = next_threshold - outer_threshold
         else:
-            outer_excess = outer_dirac_delta.position - outer_threshold
+            outer_excess = outer_position - outer_threshold
             next_excess = mean - next_threshold
             distance = outer_threshold - next_threshold
         if not (outer_excess > 0 and next_excess > 0 and distance > 0):
@@ -565,40 +574,42 @@ class PlotData:
 
     @staticmethod
     def _get_binning(
-        finite_sorted_dirac_deltas: list[DiracDelta],
         boundary_positions: np.ndarray,
         boundary_probabilities: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Finds the binning for the given finite and sorted Dirac deltas and the
-        calculated internal boundary positions and probabilities.
+        Finds the binning for the calculated internal boundary positions and
+        probabilities of finite and sorted Dirac deltas.
 
         Args:
-            finite_sorted_dirac_deltas: The input Dirac deltas with finite and
-                sorted positions.
             boundary_positions: The internal boundary positions that are
-                intermediaries to get a binning.
+                intermediaries to get a binning, from `_determine_boundary_positions`.
+                Their odd entries are the positions of the Dirac deltas.
             boundary_probabilities: The internal boundary probabilities that are
-                intermediaries to get a binning.
+                intermediaries to get a binning. Their odd entries are the masses of
+                the Dirac deltas.
         Returns:
             (boundary_positions, bin_widths, bin_heights): The boundary positions,
                 bin widths, and bin heights that describe the output binning.
         """
 
-        number_of_finite_dirac_deltas = len(finite_sorted_dirac_deltas)
+        number_of_finite_dirac_deltas = (len(boundary_positions) - 1) // 2
 
         # Initialize the binning and populate it for the internal bins.
         numberOfBins = 2 * number_of_finite_dirac_deltas
-        bin_widths = np.array([np.nan] * numberOfBins)
+        bin_widths = np.full(numberOfBins, np.nan)
         bin_widths[1:-1] = boundary_positions[2:-1] - boundary_positions[1:-2]
-        bin_heights = np.array([np.nan] * numberOfBins)
+        bin_heights = np.full(numberOfBins, np.nan)
 
         # Vectorise internal bin height computation for Dirac deltas 1..N-2.
         # The bins left of Dirac deltas 1..N-2 are 2, 4, ..., 2N-4, and the bins
         # right of them are 3, 5, ..., 2N-3. Strided slices select them, because
         # the ulab NumPy of CircuitPython does not support integer-array indexing.
         if number_of_finite_dirac_deltas > 2:
-            masses = np.array([dd.mass for dd in finite_sorted_dirac_deltas[1:-1]])
+            # The masses of Dirac deltas 1..N-2 are boundary probabilities 3, 5, ...
+            masses = boundary_probabilities[
+                3 : 2 * number_of_finite_dirac_deltas - 2 : 2
+            ]
             left = slice(2, 2 * number_of_finite_dirac_deltas - 2, 2)
             right = slice(3, 2 * number_of_finite_dirac_deltas - 2, 2)
             w_left = bin_widths[left]
@@ -608,7 +619,6 @@ class PlotData:
             bin_heights[right] = avg_h * w_left / w_right
 
         boundary_positions, bin_widths, bin_heights = PlotData._handle_extremal_bins(
-            finite_sorted_dirac_deltas,
             boundary_positions,
             boundary_probabilities,
             bin_widths,
@@ -616,7 +626,6 @@ class PlotData:
             left=True,
         )
         boundary_positions, bin_widths, bin_heights = PlotData._handle_extremal_bins(
-            finite_sorted_dirac_deltas,
             boundary_positions,
             boundary_probabilities,
             bin_widths,
@@ -662,24 +671,57 @@ class PlotData:
                 Dirac delta instead, which is what `_construct_plot_data` does.
         """
 
-        if len(finite_sorted_dirac_deltas) < 2:
+        positions = np.array(
+            [dd.position for dd in finite_sorted_dirac_deltas], dtype=np.float64
+        )
+        masses = np.array(
+            [dd.mass for dd in finite_sorted_dirac_deltas], dtype=np.float64
+        )
+
+        return PlotData._create_binning_from_arrays(
+            positions, masses, exponent, use_ttr_binning
+        )
+
+    @staticmethod
+    def _create_binning_from_arrays(
+        positions: np.ndarray,
+        masses: np.ndarray,
+        exponent: int,
+        use_ttr_binning: bool,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        `create_binning` for Dirac deltas given as arrays of their positions and
+        masses, which `ttr_from_samples` uses to bin samples without building a
+        Dirac delta per sample.
+
+        Args:
+            positions: The finite and sorted positions of the input Dirac deltas.
+                At least two are required.
+            masses: The masses of the input Dirac deltas.
+            exponent: The TTR order, as for `create_binning`.
+            use_ttr_binning: Flag specifying whether to use the TTR binning method.
+        Returns:
+            (boundary_positions, bin_widths, bin_heights): The boundary positions,
+                bin widths, and bin heights that describe the output binning.
+        Raises:
+            ValueError: When given fewer than two Dirac deltas, as for
+                `create_binning`.
+        """
+
+        if len(positions) < 2:
             raise ValueError(
                 "plot_histogram_dirac_deltas: create_binning requires at least two "
-                f"Dirac deltas, got {len(finite_sorted_dirac_deltas)}"
+                f"Dirac deltas, got {len(positions)}"
             )
 
         (
             boundary_positions,
             boundary_probabilities,
         ) = PlotData._determine_boundary_positions(
-            finite_sorted_dirac_deltas, exponent, use_ttr_binning
+            positions, masses, exponent, use_ttr_binning
         )
 
-        boundary_positions, bin_widths, bin_heights = PlotData._get_binning(
-            finite_sorted_dirac_deltas, boundary_positions, boundary_probabilities
-        )
-
-        return (boundary_positions, bin_widths, bin_heights)
+        return PlotData._get_binning(boundary_positions, boundary_probabilities)
 
     @staticmethod
     def _cell_boundary_positions(
@@ -994,8 +1036,10 @@ class PlotData:
             if left:
                 dirac_delta = finite_sorted_dirac_deltas[0]
                 tail_shape = PlotData._tail_shape(
-                    dirac_delta,
-                    finite_sorted_dirac_deltas[1],
+                    dirac_delta.position,
+                    dirac_delta.mass,
+                    finite_sorted_dirac_deltas[1].position,
+                    finite_sorted_dirac_deltas[1].mass,
                     positions[1],
                     positions[2],
                     left,
@@ -1004,8 +1048,10 @@ class PlotData:
             else:
                 dirac_delta = finite_sorted_dirac_deltas[-1]
                 tail_shape = PlotData._tail_shape(
-                    dirac_delta,
-                    finite_sorted_dirac_deltas[-2],
+                    dirac_delta.position,
+                    dirac_delta.mass,
+                    finite_sorted_dirac_deltas[-2].position,
+                    finite_sorted_dirac_deltas[-2].mass,
                     positions[-2],
                     positions[-3],
                     left,
@@ -1111,7 +1157,13 @@ class PlotData:
         high_bin_widths: np.ndarray = np.array([], dtype=np.float64)
         high_bin_heights: np.ndarray = np.array([], dtype=np.float64)
 
-        for i, boundary_position in enumerate(boundary_positions):
+        # Split at the first boundary at or past the mean. Comparing them all at once
+        # is much faster than walking them, and finds the same boundary, NaN-valued
+        # and unsorted boundaries included.
+        at_or_past_mean = boundary_positions >= expected_dirac_delta.position
+        i = int(np.argmax(at_or_past_mean))
+        if at_or_past_mean[i]:
+            boundary_position = boundary_positions[i]
             if boundary_position == expected_dirac_delta.position:
                 low_boundary_positions = boundary_positions[: i + 1]
                 low_bin_widths = bin_widths[:i]
@@ -1119,9 +1171,7 @@ class PlotData:
                 high_boundary_positions = boundary_positions[i:]
                 high_bin_widths = bin_widths[i:]
                 high_bin_heights = bin_heights[i:]
-                break
-
-            if boundary_position > expected_dirac_delta.position:
+            else:
                 low_boundary_positions = np.append(
                     boundary_positions[:i], expected_dirac_delta.position
                 )
@@ -1137,7 +1187,6 @@ class PlotData:
                     bin_widths[i:], 0, boundary_position - expected_dirac_delta.position
                 )
                 high_bin_heights = bin_heights[i - 1 :]
-                break
 
         ttr += PlotData.bin_pdf_to_ttr(
             low_boundary_positions, low_bin_widths, low_bin_heights, order - 1
@@ -1147,6 +1196,143 @@ class PlotData:
         )
 
         return ttr
+
+    @staticmethod
+    def _ttr_of_binning(
+        positions: np.ndarray, masses: np.ndarray, order: int
+    ) -> list[DiracDelta]:
+        """
+        The TTR of order `order` of Dirac deltas with finite, sorted, distinct
+        positions, taken of their binning by `create_binning` without the TTR
+        binning method. This is how both `_construct_plot_data` and
+        `ttr_from_samples` reduce Dirac deltas to a TTR.
+
+        Args:
+            positions: The positions of the Dirac deltas. At least two are required.
+            masses: The masses of the Dirac deltas.
+            order: The TTR order.
+        Returns:
+            The 2 ** `order` Dirac deltas of the TTR.
+        Raises:
+            ValueError: When given fewer than two Dirac deltas, or when a split of
+                the binning leaves a half with no mass.
+        """
+
+        boundary_positions, bin_widths, bin_heights = (
+            PlotData._create_binning_from_arrays(positions, masses, 0, False)
+        )
+        return PlotData.bin_pdf_to_ttr(
+            boundary_positions, bin_widths, bin_heights, order
+        )
+
+    @staticmethod
+    def ttr_from_samples(
+        samples: np.ndarray | list[float], order: int
+    ) -> DistributionalValue:
+        """
+        Reduces samples to a TTR of order `order`, i.e., to 2 ** `order` Dirac
+        deltas, for example to export them as a Ux string.
+
+        Gives the same Dirac deltas as reducing `DistributionalValue.from_samples`
+        the way `_construct_plot_data` reduces more Dirac deltas than it can plot.
+        Both combine coincident Dirac deltas with
+        `DistributionalValue.combine_sorted_arrays`, and take the TTR of their
+        binning with `_ttr_of_binning`. This works on arrays of the samples instead
+        of a Dirac delta per sample, which for a million samples is over ten times
+        faster. Where plotting falls back to merging neighbouring Dirac deltas when
+        the binning cannot be split, this raises instead.
+
+        Non-finite samples are not part of the TTR. They keep their share of the
+        mass, as NaN, -Inf, and +Inf Dirac deltas.
+
+        Args:
+            samples: 1-D array of float samples (may contain NaN/Inf).
+            order: The TTR order, at least 0.
+        Returns:
+            A `DistributionalValue` holding the 2 ** `order` Dirac deltas of the TTR,
+                followed by any for non-finite samples. For an order of 0 and finite
+                samples that are all equal, the TTR is the single Dirac delta at
+                their position.
+        Raises:
+            ValueError: If `samples` is not 1-D, is empty, or `order` is negative.
+                Also if no sample is finite, or if, for an order above 0, the
+                finite samples are all equal, to within the threshold of
+                `DistributionalValue.combine_dirac_deltas`, as there is then
+                nothing to split. Also if the samples are too concentrated to split
+                into a valid TTR of 2 ** `order` Dirac deltas in double precision,
+                for example 999 samples at 5.0 and one at 5.000000000001 from order
+                2. A lower order may then work.
+        """
+
+        samples = np.asarray(samples, dtype=np.float64)
+        if np.ndim(samples) != 1:
+            raise ValueError(
+                f"samples must be a 1-D array, got {np.ndim(samples)} dimensions."
+            )
+        if len(samples) == 0:
+            raise ValueError("samples array must not be empty.")
+        if order < 0:
+            raise ValueError(f"order must be at least 0, got {order}")
+
+        # Each sample has the mass `DistributionalValue.from_samples` gives it.
+        mass_per_sample = 1.0 / len(samples)
+        positions = np.sort(samples[np.isfinite(samples)])
+        masses = np.full(len(positions), mass_per_sample)
+        if len(positions) >= 2:
+            positions, masses, _ = DistributionalValue.combine_sorted_arrays(
+                positions, masses
+            )
+
+        if len(positions) == 0:
+            raise ValueError(
+                "ttr_from_samples: no sample is finite, so there is no TTR"
+            )
+
+        dirac_deltas: list[DiracDelta]
+        if len(positions) == 1:
+            if order > 0:
+                raise ValueError(
+                    "ttr_from_samples: the finite samples are all equal, to within "
+                    "the threshold of `DistributionalValue.combine_dirac_deltas`, so "
+                    f"there is nothing to split into a TTR of order {order}. Order 0 "
+                    "gives their single Dirac delta."
+                )
+            dirac_deltas = [DiracDelta(float(positions[0]), mass=float(masses[0]))]
+        else:
+            # The binning puts each boundary at the mass-weighted mean of the Dirac
+            # deltas either side of it, so most of the mass can sit in bins only a
+            # few doubles wide. Splitting those into many parts leaves some with no
+            # mass, which `bin_pdf_to_ttr` rejects, or rounds the means of some onto
+            # one position, which is no TTR.
+            too_concentrated = (
+                "ttr_from_samples: the samples are too concentrated for a TTR of "
+                f"order {order} in double precision, as splitting them that finely "
+                "leaves parts with no mass or with the same position. A lower order "
+                "may work."
+            )
+            try:
+                dirac_deltas = PlotData._ttr_of_binning(positions, masses, order)
+            except ValueError as error:
+                raise ValueError(too_concentrated) from error
+            # Checking the TTR combines Dirac deltas at one position, which then
+            # leaves fewer than the TTR has, even if the rest are a valid TTR.
+            ttr = DistributionalValue(dirac_deltas=dirac_deltas)
+            if not ttr.check_is_full_valid_TTR() or ttr.UR_order != 2**order:
+                raise ValueError(too_concentrated)
+
+        for position, is_position in (
+            (np.nan, np.isnan(samples)),
+            (-np.inf, samples == -np.inf),
+            (np.inf, samples == np.inf),
+        ):
+            count = int(np.sum(is_position))
+            if count > 0:
+                dirac_deltas.append(DiracDelta(position, mass=count / len(samples)))
+
+        dist = DistributionalValue(dirac_deltas=dirac_deltas)
+        dist.sort()
+
+        return dist
 
     def _construct_plot_data(self) -> None:
         """Constructs the `PlotData`, after parsing the given `DistributionalValue`.
@@ -1203,20 +1389,18 @@ class PlotData:
             or self.dist.check_is_full_valid_TTR()
         )
 
+        # The positions and masses of the finite Dirac deltas, which sorting puts
+        # first.
+        finite_positions = self.dist.positions[: len(finite_dirac_deltas)]
+        finite_masses = self.dist.masses[: len(finite_dirac_deltas)]
+
         if use_ttr_route:
             try:
-                # Create the binning such that the average of two bins surrounding a Dirac delta
-                # is the Dirac delta itself.
-                boundary_positions, bin_widths, bin_heights = PlotData.create_binning(
-                    finite_dirac_deltas, 0, False
-                )
-
-                # Find the TTR of the created binning. This is always a valid TTR.
-                ttr = PlotData.bin_pdf_to_ttr(
-                    boundary_positions,
-                    bin_widths,
-                    bin_heights,
-                    self.plotting_ttr_order,
+                # Find the TTR of the binning in which the average of the two bins
+                # surrounding a Dirac delta is the Dirac delta itself. This is always
+                # a valid TTR.
+                ttr = PlotData._ttr_of_binning(
+                    finite_positions, finite_masses, self.plotting_ttr_order
                 )
 
                 # Create the binning from the obtained (valid) TTR using the TTR binning method.
@@ -1246,15 +1430,9 @@ class PlotData:
             # steps that path uses: bin the Dirac deltas without assuming a valid
             # TTR, then take the TTR of that binning. Both steps preserve the total
             # mass and the mean.
-            boundary_positions, bin_widths, bin_heights = PlotData.create_binning(
-                finite_dirac_deltas, 0, False
-            )
             try:
-                finite_dirac_deltas = PlotData.bin_pdf_to_ttr(
-                    boundary_positions,
-                    bin_widths,
-                    bin_heights,
-                    reduction_order,
+                finite_dirac_deltas = PlotData._ttr_of_binning(
+                    finite_positions, finite_masses, reduction_order
                 )
             except ValueError:
                 # A support only a few ulps wide cannot be split. Merge runs of

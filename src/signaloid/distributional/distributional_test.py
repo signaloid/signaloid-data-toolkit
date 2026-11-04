@@ -20,8 +20,10 @@
 
 
 import csv
+import math
 import os
 import unittest
+from typing import Any
 
 import numpy as np
 from signaloid.distributional.dirac_delta import DiracDelta
@@ -453,6 +455,32 @@ class TestDistributionalValueFromSamples(unittest.TestCase):
         with self.assertRaises(ValueError):
             DistributionalValue.from_samples(np.array([]))
 
+    def test_samples_that_are_not_1d_raise(self) -> None:
+        """A column of samples, or a single one, is rejected up front rather than
+        failing later, e.g., when the mean multiplies a list."""
+        # A scalar is deliberately not an array.
+        not_1d: list[Any] = [np.zeros((10, 1)), np.zeros((10, 2)), np.float64(1.0)]
+        for samples in not_1d:
+            with self.subTest(shape=np.shape(samples)):
+                with self.assertRaises(ValueError) as raised:
+                    DistributionalValue.from_samples(samples)
+                self.assertIn("1-D", str(raised.exception))
+
+    def test_integer_samples_combine_into_one_dirac_delta_per_value(self) -> None:
+        """Samples taking a few values many times each combine into one Dirac delta
+        per value, with that value's share of the samples as its mass."""
+        samples = np.random.default_rng(162).integers(-3, 4, 100_000).astype(float)
+        dist = DistributionalValue.from_samples(samples)
+
+        dist.combine_dirac_deltas()
+
+        values, counts = np.unique(samples, return_counts=True)
+        self.assertEqual(
+            [dd.position for dd in dist.finite_dirac_deltas], values.tolist()
+        )
+        for dirac_delta, count in zip(dist.finite_dirac_deltas, counts):
+            self.assertAlmostEqual(dirac_delta.mass, count / len(samples), places=12)
+
     def test_all_nan_samples(self) -> None:
         """All-NaN samples should have nan_mass == 1 after sort."""
         dist = DistributionalValue.from_samples(np.full(50, np.nan))
@@ -559,6 +587,147 @@ class TestCombineDiracDeltas(unittest.TestCase):
 
                 self.assertEqual(len(dist.finite_dirac_deltas), 1)
                 self.assertAlmostEqual(dist.finite_dirac_deltas[0].mass, 1.0)
+
+    def test_equal_samples_combine_into_one_dirac_delta(self) -> None:
+        """
+        A thousand equal samples combine into one Dirac delta at their position, also
+        alongside non-finite samples, and also when curing, which only combines equal
+        positions. They used to drift into several Dirac deltas just below it.
+        """
+        for position in (5.0, -3.7, 1e10):
+            for non_finite in ([], [np.nan, np.inf, -np.inf]):
+                with self.subTest(position=position, non_finite=non_finite):
+                    samples = np.concatenate((np.full(1000, position), non_finite))
+                    for combine in ("combine_dirac_deltas", "cure"):
+                        dist = DistributionalValue.from_samples(samples)
+
+                        getattr(dist, combine)()
+
+                        self.assertEqual(
+                            [dd.position for dd in dist.finite_dirac_deltas],
+                            [position],
+                        )
+                        self.assertAlmostEqual(
+                            dist.finite_dirac_deltas[0].mass, 1000 / len(samples)
+                        )
+
+    def test_samples_closer_than_the_threshold_combine_into_one(self) -> None:
+        """Samples spread over 40 ulps around 5.0, closer together than the threshold
+        of 5.0 * 1e-14, about 56 ulps, combine into one Dirac delta."""
+        rng = np.random.default_rng(162)
+        samples = 5.0 + math.ulp(5.0) * rng.integers(0, 41, 10_000)
+        dist = DistributionalValue.from_samples(samples)
+
+        dist.combine_dirac_deltas()
+
+        self.assertEqual(len(dist.finite_dirac_deltas), 1)
+        self.assertLessEqual(
+            float(np.min(samples)), dist.finite_dirac_deltas[0].position
+        )
+        self.assertLessEqual(
+            dist.finite_dirac_deltas[0].position, float(np.max(samples))
+        )
+
+    def test_dirac_deltas_without_mass_combine(self) -> None:
+        """Dirac deltas with no mass, at equal or at different positions within the
+        threshold, combine without dividing by their total mass, also when no Dirac
+        delta has any mass."""
+        for name, dirac_deltas, expected in (
+            (
+                "equal positions",
+                [DiracDelta(1.0, mass=0.0), DiracDelta(1.0, mass=0.0)],
+                [(1.0, 0.0)],
+            ),
+            (
+                "different positions",
+                [
+                    DiracDelta(1.0, mass=0.0),
+                    DiracDelta(1.0 + 4 * math.ulp(1.0), mass=0.0),
+                    DiracDelta(2.0, mass=1.0),
+                ],
+                [(1.0 + 2 * math.ulp(1.0), 0.0), (2.0, 1.0)],
+            ),
+        ):
+            with self.subTest(name):
+                dist = DistributionalValue(dirac_deltas=dirac_deltas)
+
+                dist.combine_dirac_deltas()
+
+                self.assertEqual(
+                    [(dd.position, dd.mass) for dd in dist.finite_dirac_deltas],
+                    expected,
+                )
+
+    def test_a_dirac_delta_combines_into_the_combination_before_it(self) -> None:
+        """
+        Within the threshold of 1, 0 and 0.9 combine into 0.45. Then 1.8, although
+        within the threshold of 0.9, is compared with 0.45 and kept, and 2.7
+        combines into it. 5.0 is kept as it is.
+        """
+        dirac_deltas = [
+            DiracDelta(position, mass=0.2) for position in (0.0, 0.9, 1.8, 2.7, 5.0)
+        ]
+        dist = DistributionalValue(dirac_deltas=list(dirac_deltas))
+
+        # The range of 5 makes the threshold 1, and the mean threshold is tiny.
+        dist.combine_dirac_deltas(1e-14, 0.2)
+
+        finite_dirac_deltas = dist.finite_dirac_deltas
+        self.assertEqual(len(finite_dirac_deltas), 3)
+        for dirac_delta, position, mass in zip(
+            finite_dirac_deltas, (0.45, 2.25, 5.0), (0.4, 0.4, 0.2)
+        ):
+            self.assertAlmostEqual(dirac_delta.position, position)
+            self.assertAlmostEqual(dirac_delta.mass, mass)
+        self.assertIs(finite_dirac_deltas[2], dirac_deltas[4])
+
+    def test_matches_combining_one_dirac_delta_at_a_time(self) -> None:
+        """
+        On positions rounded to hundredths, which coincide often and otherwise lie
+        at least a hundredth apart, the result is that of taking the sorted Dirac
+        deltas one at a time and combining each into the last one kept when they
+        are similar. A threshold of 0.015 chains neighbours a hundredth apart into
+        runs whose combination drifts away from their next neighbour. The Dirac
+        deltas are the same, to rounding, as equal positions combine at once.
+        """
+        rng = np.random.default_rng(162)
+        positions = np.round(rng.standard_normal(3000), 2)
+        masses = rng.uniform(0.1, 1.0, len(positions))
+        support_range = float(np.max(positions) - np.min(positions))
+
+        for relative_range_threshold in (0.0, 0.015 / support_range):
+            with self.subTest(relative_range_threshold=relative_range_threshold):
+                dirac_deltas = [
+                    DiracDelta(float(position), mass=float(mass))
+                    for position, mass in zip(positions, masses)
+                ]
+                dist = DistributionalValue(dirac_deltas=list(dirac_deltas))
+
+                dist.combine_dirac_deltas(1e-14, relative_range_threshold)
+
+                threshold = (
+                    support_range * relative_range_threshold
+                    if relative_range_threshold > 0
+                    else 0.0
+                )
+                expected = sorted(dirac_deltas, key=lambda dd: dd.position)[:1]
+                for dd in sorted(dirac_deltas, key=lambda dd: dd.position)[1:]:
+                    if expected[-1].similar(dd, threshold):
+                        expected[-1] = expected[-1] + dd
+                    else:
+                        expected.append(dd)
+
+                self.assertLess(len(expected), len(dirac_deltas))
+                self.assertEqual(len(dist.finite_dirac_deltas), len(expected))
+                for combined, reference in zip(dist.finite_dirac_deltas, expected):
+                    self.assertTrue(
+                        math.isclose(
+                            combined.position, reference.position, rel_tol=1e-12
+                        )
+                    )
+                    self.assertTrue(
+                        math.isclose(combined.mass, reference.mass, rel_tol=1e-12)
+                    )
 
 
 class TestDistributionalValueRange(unittest.TestCase):
@@ -1182,6 +1351,20 @@ class TestDistributionalValueCentralMoments(unittest.TestCase):
 
 
 class TestFromWeightedSamples(unittest.TestCase):
+    def test_integer_positions_become_floats(self) -> None:
+        """NumPy unsigned integer positions, which would wrap around in arithmetic,
+        are kept as floats, so their Dirac deltas combine at the mean."""
+        dist = DistributionalValue.from_weighted_samples(
+            np.array([5, 3, 5], dtype=np.uint64), np.ones(3)
+        )
+
+        self.assertTrue(all(type(dd.position) is float for dd in dist.dirac_deltas))
+        dist.combine_dirac_deltas()
+        self.assertEqual([dd.position for dd in dist.finite_dirac_deltas], [3.0, 5.0])
+        self.assertAlmostEqual(
+            (dist.dirac_deltas[0] + dist.dirac_deltas[1]).position, 13 / 3
+        )
+
     def test_normalises_masses_and_round_trips_positions(self) -> None:
         """Masses are normalised to sum to 1. Positions round-trip in order."""
         dist = DistributionalValue.from_weighted_samples(
@@ -1303,6 +1486,334 @@ class TestUxBinaryFormatDetection(unittest.TestCase):
         """Buffers too short to detect the layout return None."""
         self.assertIsNone(DistributionalValue.parse(b""))
         self.assertIsNone(DistributionalValue.parse(bytes(8)))
+
+    def test_export_of_many_dirac_deltas_round_trips_through_parse(self) -> None:
+        """A value with as many Dirac deltas as `parse` accepts survives export ->
+        parse unchanged, as a Ux string and as Ux Binary Data, in double and in
+        single precision."""
+        rng = np.random.default_rng(162)
+        dirac_deltas = [
+            DiracDelta(float(position), mass=1e-4)
+            for position in rng.standard_normal(10_000)
+        ]
+        for double_precision in (True, False):
+            dist = DistributionalValue(
+                dirac_deltas=dirac_deltas, double_precision=double_precision
+            )
+            for encoded in (str(dist), bytes(dist)):
+                with self.subTest(
+                    double_precision=double_precision, encoding=type(encoded)
+                ):
+                    parsed = DistributionalValue.parse(encoded, double_precision)
+
+                    assert parsed is not None
+                    expected_positions = (
+                        dist.positions
+                        if double_precision
+                        else dist.positions.astype(np.float32)
+                    )
+                    np.testing.assert_array_equal(parsed.positions, expected_positions)
+                    np.testing.assert_array_equal(parsed.raw_masses, dist.raw_masses)
+
+
+class TestFactsFollowChanges(unittest.TestCase):
+    """What a value works out about its Dirac deltas, e.g., that they are sorted,
+    or their mean, is worked out again once they change in place. A mean set
+    explicitly is kept."""
+
+    @staticmethod
+    def sorted_value() -> DistributionalValue:
+        dist = DistributionalValue.from_samples(np.array([1.0, 2.0, 3.0, np.nan]))
+        dist.sort()
+        return dist
+
+    def test_a_value_changed_in_place_is_sorted_again(self) -> None:
+        """Moving a Dirac delta out of order makes the value unsorted, and sorting
+        it again keeps the mass of its NaN Dirac delta."""
+        dist = self.sorted_value()
+        self.assertTrue(dist.is_sorted)
+
+        dist.dirac_deltas[0].position = 2.5
+
+        self.assertFalse(dist.is_sorted)
+        self.assertEqual(
+            [dd.position for dd in dist.finite_dirac_deltas], [2.0, 2.5, 3.0]
+        )
+        self.assertAlmostEqual(dist.nan_dirac_delta.mass, 0.25)
+
+    def test_sorting_again_keeps_the_mass_of_non_finite_dirac_deltas(self) -> None:
+        """The value's own NaN Dirac delta, in its list from sorting before, counts
+        when it is sorted again."""
+        dist = self.sorted_value()
+        dist.dirac_deltas.reverse()
+
+        dist.sort()
+
+        self.assertAlmostEqual(dist.nan_dirac_delta.mass, 0.25)
+        self.assertEqual(
+            [dd.position for dd in dist.finite_dirac_deltas], [1.0, 2.0, 3.0]
+        )
+
+    def test_dropping_zero_masses_after_sorting_keeps_finite_dirac_deltas(
+        self,
+    ) -> None:
+        """Sorting adds -Inf and +Inf Dirac deltas with no mass after the NaN one,
+        and dropping zero masses keeps them, so `finite_dirac_deltas` still finds
+        the finite ones in front of all three."""
+        dist = self.sorted_value()
+
+        dist.drop_zero_mass_positions()
+
+        self.assertEqual(
+            [dd.position for dd in dist.finite_dirac_deltas], [1.0, 2.0, 3.0]
+        )
+
+    def test_statistics_and_flags_follow_changes_made_in_place(self) -> None:
+        """The mean, variance, and flags are those of the Dirac deltas as they now
+        are."""
+        dist = DistributionalValue(
+            dirac_deltas=[DiracDelta(1.0, mass=0.5), DiracDelta(3.0, mass=0.5)]
+        )
+        self.assertEqual(
+            (dist.mean, dist.variance, dist.is_finite, dist.has_no_zero_mass),
+            (2.0, 1.0, True, True),
+        )
+        self.assertTrue(dist.is_cured)
+
+        dist.dirac_deltas[1].position = 1.0
+        self.assertEqual((dist.mean, dist.variance), (1.0, 0.0))
+        self.assertFalse(dist.is_cured)
+
+        dist.dirac_deltas[1].mass = 0.0
+        self.assertFalse(dist.has_no_zero_mass)
+
+        dist.dirac_deltas.append(DiracDelta(np.inf, mass=0.5))
+        self.assertFalse(dist.is_finite)
+
+    def test_an_explicit_mean_is_kept(self) -> None:
+        """A mean set explicitly, as `parse` sets it from the Ux header, is kept
+        through changes. Calculating the mean replaces it."""
+        dist = DistributionalValue(
+            dirac_deltas=[DiracDelta(1.0, mass=0.5), DiracDelta(3.0, mass=0.5)]
+        )
+        dist.mean = 10.0
+
+        dist.dirac_deltas[0].position = 2.0
+        dist.sort()
+        self.assertEqual(dist.mean, 10.0)
+
+        self.assertEqual(dist.calculate_mean(), 2.5)
+        dist.dirac_deltas[0].position = 1.0
+        self.assertEqual(dist.mean, 2.0)
+
+
+class TestArraysWorkedOutAlongTheWay(unittest.TestCase):
+    """`from_samples`, `sort`, and `combine_dirac_deltas` keep the arrays of the
+    Dirac deltas they work out, which must be exactly those of the Dirac deltas,
+    and sorting with them must give what sorting the Dirac deltas gives."""
+
+    def assert_arrays_are_those_of_the_dirac_deltas(
+        self, dist: DistributionalValue
+    ) -> None:
+        arrays = dist._arrays()
+        np.testing.assert_array_equal(
+            arrays.positions,
+            np.array([dd.position for dd in dist.dirac_deltas], dtype=np.float64),
+        )
+        np.testing.assert_array_equal(
+            arrays.masses,
+            np.array([dd.mass for dd in dist.dirac_deltas], dtype=np.float64),
+        )
+
+    def test_sorting_with_and_without_the_arrays_agree(self) -> None:
+        """A value from samples sorts with its arrays, and one built from the same
+        Dirac deltas without arrays sorts them one at a time. Both give the same
+        Dirac deltas, in the same order, with the same non-finite masses."""
+        rng = np.random.default_rng(162)
+        samples = np.round(rng.standard_normal(2000), 1)
+        samples[rng.random(2000) < 0.02] = np.nan
+        samples[rng.random(2000) < 0.01] = np.inf
+        samples[rng.random(2000) < 0.01] = -np.inf
+
+        with_arrays = DistributionalValue.from_samples(samples)
+        self.assert_arrays_are_those_of_the_dirac_deltas(with_arrays)
+        without_arrays = DistributionalValue(
+            dirac_deltas=list(with_arrays.dirac_deltas)
+        )
+
+        for dist in (with_arrays, without_arrays):
+            dist.sort()
+        self.assertEqual(
+            [id(dd) for dd in with_arrays.finite_dirac_deltas],
+            [id(dd) for dd in without_arrays.finite_dirac_deltas],
+        )
+        for special in (
+            "nan_dirac_delta",
+            "neg_inf_dirac_delta",
+            "pos_inf_dirac_delta",
+        ):
+            self.assertEqual(
+                getattr(with_arrays, special).mass,
+                getattr(without_arrays, special).mass,
+            )
+        self.assert_arrays_are_those_of_the_dirac_deltas(with_arrays)
+
+        with_arrays.combine_dirac_deltas()
+        self.assert_arrays_are_those_of_the_dirac_deltas(with_arrays)
+
+
+class TestCachedArrays(unittest.TestCase):
+    """The arrays the statistics are computed from are kept, and computed again
+    whenever the Dirac deltas change."""
+
+    @staticmethod
+    def statistics(dist: DistributionalValue) -> list[Any]:
+        points = np.array([-1.0, 0.0, 0.5, 2.0])
+        return [
+            dist.positions.tolist(),
+            dist.masses.tolist(),
+            dist.raw_masses.tolist(),
+            dist.cdf(points).tolist(),
+            dist.cdf(points, treat_as_samples=True).tolist(),
+            dist.quantile(0.3),
+            dist.inverse_cdf(np.array([0.1, 0.5, 0.9])).tolist(),
+            dist.range,
+            dist.raw_moments(2),
+            dist.check_is_finite(),
+        ]
+
+    def test_statistics_follow_changes_to_the_dirac_deltas(self) -> None:
+        """After every change to the Dirac deltas, the statistics are those of a
+        new value holding the same Dirac deltas."""
+        rng = np.random.default_rng(162)
+        masses = rng.uniform(0.0, 1.0, 50)
+        masses[::7] = 0.0
+        dist = DistributionalValue(
+            dirac_deltas=[
+                DiracDelta(float(position), mass=float(mass))
+                for position, mass in zip(np.round(rng.standard_normal(50), 1), masses)
+            ]
+        )
+
+        for change, apply in (
+            ("none", lambda: None),
+            ("sort", dist.sort),
+            ("drop_zero_mass_positions", dist.drop_zero_mass_positions),
+            ("combine_dirac_deltas", dist.combine_dirac_deltas),
+            ("append", lambda: dist.dirac_deltas.append(DiracDelta(3.0, mass=0.5))),
+            ("cure", dist.cure),
+        ):
+            with self.subTest(change=change):
+                apply()
+
+                fresh = DistributionalValue(dirac_deltas=list(dist.dirac_deltas))
+                self.assertEqual(self.statistics(dist), self.statistics(fresh))
+
+    def test_statistics_follow_changes_made_in_place(self) -> None:
+        """Changing a Dirac delta, or changing the list in place, also leaves the
+        statistics of a new value holding the same Dirac deltas."""
+        rng = np.random.default_rng(162)
+        dist = DistributionalValue(
+            dirac_deltas=[
+                DiracDelta(float(position), mass=0.02)
+                for position in rng.standard_normal(50)
+            ]
+        )
+
+        def add_in_place() -> None:
+            dirac_deltas = dist.dirac_deltas
+            dirac_deltas += [DiracDelta(11.0, mass=0.1)]
+
+        for change, apply in (
+            ("mass", lambda: setattr(dist.dirac_deltas[0], "mass", 0.5)),
+            ("raw_mass", lambda: setattr(dist.dirac_deltas[1], "raw_mass", 2**61)),
+            ("position", lambda: setattr(dist.dirac_deltas[2], "position", 7.0)),
+            (
+                "item",
+                lambda: dist.dirac_deltas.__setitem__(3, DiracDelta(-7.0, mass=0.3)),
+            ),
+            (
+                "slice",
+                lambda: dist.dirac_deltas.__setitem__(
+                    slice(4, 6), [DiracDelta(9.0, mass=0.1)]
+                ),
+            ),
+            ("del", lambda: dist.dirac_deltas.__delitem__(0)),
+            ("insert", lambda: dist.dirac_deltas.insert(0, DiracDelta(-9.0, mass=1))),
+            ("pop", lambda: dist.dirac_deltas.pop()),
+            ("remove", lambda: dist.dirac_deltas.remove(dist.dirac_deltas[5])),
+            ("extend", lambda: dist.dirac_deltas.extend([DiracDelta(8.0, mass=1)])),
+            ("+=", add_in_place),
+            ("sort", lambda: dist.dirac_deltas.sort(key=lambda dd: -dd.position)),
+            ("reverse", lambda: dist.dirac_deltas.reverse()),
+        ):
+            with self.subTest(change=change):
+                # Compute the arrays before the change.
+                self.statistics(dist)
+
+                apply()
+
+                fresh = DistributionalValue(dirac_deltas=list(dist.dirac_deltas))
+                self.assert_statistics_close(
+                    self.statistics(dist), self.statistics(fresh)
+                )
+
+    def assert_statistics_close(
+        self, statistics: list[Any], expected: list[Any]
+    ) -> None:
+        """The statistics agree to rounding. A list changed in place keeps the
+        flag that says it is sorted, so the value does not sort it again, and sums
+        over it can then run in another order than over a value that does."""
+        for statistic, expected_statistic in zip(statistics, expected):
+            if isinstance(statistic, list):
+                np.testing.assert_allclose(statistic, expected_statistic, rtol=1e-12)
+            elif isinstance(statistic, float):
+                self.assertTrue(
+                    math.isclose(statistic, expected_statistic, rel_tol=1e-12)
+                )
+            else:
+                self.assertEqual(statistic, expected_statistic)
+
+    def test_the_value_keeps_a_list_of_its_own(self) -> None:
+        """Changing the list a value was built from does not change the value."""
+        dirac_deltas = [DiracDelta(1.0, mass=0.5), DiracDelta(2.0, mass=0.5)]
+        dist = DistributionalValue(dirac_deltas=dirac_deltas)
+
+        dirac_deltas.append(DiracDelta(3.0, mass=1.0))
+
+        self.assertEqual(dist.positions.tolist(), [1.0, 2.0])
+
+    def test_arrays_returned_are_copies(self) -> None:
+        """Changing an array a value returns does not change the value."""
+        dist = DistributionalValue(
+            dirac_deltas=[DiracDelta(1.0, mass=0.25), DiracDelta(2.0, mass=0.75)]
+        )
+        dist.positions[:] = 0.0
+        dist.masses[:] = 0.0
+        dist.raw_masses[:] = 0
+
+        self.assertEqual(dist.positions.tolist(), [1.0, 2.0])
+        self.assertEqual(dist.masses.tolist(), [0.25, 0.75])
+        self.assertEqual(dist.cdf(1.5), 0.25)
+
+    def test_check_is_finite(self) -> None:
+        """No Dirac deltas has no answer. Any NaN or infinite position is not
+        finite."""
+        self.assertIsNone(DistributionalValue().check_is_finite())
+        for position, expected in (
+            (2.0, True),
+            (np.nan, False),
+            (np.inf, False),
+            (-np.inf, False),
+        ):
+            with self.subTest(position=position):
+                dist = DistributionalValue(
+                    dirac_deltas=[
+                        DiracDelta(1.0, mass=0.5),
+                        DiracDelta(position, mass=0.5),
+                    ]
+                )
+                self.assertEqual(dist.check_is_finite(), expected)
 
 
 class TestDistributionalValueInverseCdf(unittest.TestCase):

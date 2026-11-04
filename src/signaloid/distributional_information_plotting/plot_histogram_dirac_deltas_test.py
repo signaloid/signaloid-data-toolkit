@@ -24,6 +24,7 @@ import os
 import random
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from signaloid.distributional.dirac_delta import DiracDelta
@@ -247,8 +248,10 @@ class TestCreateBinning(unittest.TestCase):
                 )
 
                 detected_right_shape = PlotData._tail_shape(
-                    input_ttr[-1],
-                    input_ttr[-2],
+                    input_ttr[-1].position,
+                    input_ttr[-1].mass,
+                    input_ttr[-2].position,
+                    input_ttr[-2].mass,
                     boundary_positions[-3],
                     boundary_positions[-5],
                     False,
@@ -305,7 +308,9 @@ class TestCreateBinningGuards(unittest.TestCase):
                     self.assertIn("at least two Dirac deltas", str(raised.exception))
 
         with self.assertRaises(ValueError):
-            PlotData._determine_boundary_positions([DiracDelta(2.5, mass=1.0)], 0, True)
+            PlotData._determine_boundary_positions(
+                np.array([2.5]), np.array([1.0]), 0, True
+            )
 
     def test_smallest_plotting_resolution_bins_a_valid_ttr(self) -> None:
         """A `plotting_resolution` of 2 puts `plotting_ttr_order` at 0, which would
@@ -1218,6 +1223,197 @@ def dirac_deltas_to_ttr(
     ttr.extend(current_dirac_delta)
 
     return ttr
+
+
+class TestBinPdfToTTR(unittest.TestCase):
+    """Covers `PlotData.bin_pdf_to_ttr()` on bin PDFs whose TTR is known."""
+
+    def test_a_mean_on_a_boundary_splits_there(self) -> None:
+        """Two equal bins have their mean on the boundary between them."""
+        ttr = PlotData.bin_pdf_to_ttr(
+            np.array([-1.0, 0.0, 1.0]), np.array([1.0, 1.0]), np.array([0.5, 0.5]), 1
+        )
+
+        self.assertEqual(
+            [(dd.position, dd.mass) for dd in ttr], [(-0.5, 0.5), (0.5, 0.5)]
+        )
+
+    def test_a_mean_inside_a_bin_splits_the_bin(self) -> None:
+        """
+        Bins [0, 1] and [1, 3] holding 0.25 and 0.75 have their mean at 1.625,
+        inside the second bin. The half below holds 0.25 + 0.625 * 0.375, with mean
+        443 / 496, and the half above holds 1.375 * 0.375, with mean 2.3125.
+        """
+        ttr = PlotData.bin_pdf_to_ttr(
+            np.array([0.0, 1.0, 3.0]), np.array([1.0, 2.0]), np.array([0.25, 0.375]), 1
+        )
+
+        self.assertEqual(len(ttr), 2)
+        self.assertAlmostEqual(ttr[0].position, 443 / 496)
+        self.assertAlmostEqual(ttr[0].mass, 0.484375)
+        self.assertAlmostEqual(ttr[1].position, 2.3125)
+        self.assertAlmostEqual(ttr[1].mass, 0.515625)
+
+
+class TestTTRFromSamples(unittest.TestCase):
+    """Covers `PlotData.ttr_from_samples()`, which reduces samples to a TTR."""
+
+    @staticmethod
+    def reduce_from_samples(samples: np.ndarray, order: int) -> list[DiracDelta]:
+        """The TTR of the samples, reduced from `DistributionalValue.from_samples()`
+        the way `_construct_plot_data` reduces more Dirac deltas than it can plot."""
+        dist = DistributionalValue.from_samples(samples)
+        dist.drop_zero_mass_positions()
+        dist.combine_dirac_deltas()
+        boundary_positions, bin_widths, bin_heights = PlotData.create_binning(
+            dist.finite_dirac_deltas, 0, False
+        )
+        return PlotData.bin_pdf_to_ttr(
+            boundary_positions, bin_widths, bin_heights, order
+        )
+
+    def test_matches_reducing_from_samples(self) -> None:
+        """
+        The TTR is exactly the one reduced from `DistributionalValue.from_samples()`,
+        also when samples coincide and combine, and when some are not finite.
+        """
+        rng = np.random.default_rng(162)
+        sample_sets = {
+            "normal": rng.normal(3.0, 1.5, 5000),
+            "exponential": rng.exponential(2.0, 3000),
+            "coincident": np.round(rng.standard_normal(4000), 2),
+            "non-finite": np.concatenate(
+                (rng.standard_normal(2000), [np.nan, np.inf, -np.inf, np.nan])
+            ),
+            "three samples": np.array([1.0, 2.0, 4.0]),
+        }
+
+        for name, samples in sample_sets.items():
+            for order in (0, 3, 9):
+                with self.subTest(samples=name, order=order):
+                    ttr = PlotData.ttr_from_samples(samples, order)
+
+                    expected = self.reduce_from_samples(samples, order)
+                    self.assertEqual(
+                        [(dd.position, dd.raw_mass) for dd in ttr.finite_dirac_deltas],
+                        [(dd.position, dd.raw_mass) for dd in expected],
+                    )
+
+    def test_is_a_full_valid_ttr_with_the_mean_of_the_samples(self) -> None:
+        """A TTR of order 9 has 512 Dirac deltas, a total mass of one, and the mean
+        of the samples."""
+        samples = np.random.default_rng(162).standard_normal(10_000)
+
+        ttr = PlotData.ttr_from_samples(samples, 9)
+
+        self.assertEqual(ttr.UR_order, 512)
+        self.assertTrue(ttr.check_is_full_valid_TTR())
+        self.assertAlmostEqual(float(np.sum(ttr.masses)), 1.0)
+        mean = ttr.mean
+        assert mean is not None
+        self.assertAlmostEqual(mean, float(np.mean(samples)), places=12)
+
+    def test_non_finite_samples_keep_their_mass(self) -> None:
+        """NaN, -Inf, and +Inf samples are left out of the TTR and keep their share
+        of the mass, which the Ux string carries."""
+        rng = np.random.default_rng(162)
+        samples = np.concatenate(
+            (
+                rng.standard_normal(1000),
+                np.full(10, np.nan),
+                np.full(5, -np.inf),
+                np.full(5, np.inf),
+            )
+        )
+        rng.shuffle(samples)
+
+        ttr = PlotData.ttr_from_samples(samples, 4)
+
+        self.assertEqual(len(ttr.finite_dirac_deltas), 16)
+        self.assertAlmostEqual(
+            sum(dd.mass for dd in ttr.finite_dirac_deltas), 1000 / 1020
+        )
+        self.assertAlmostEqual(ttr.nan_dirac_delta.mass, 10 / 1020)
+        self.assertAlmostEqual(ttr.neg_inf_dirac_delta.mass, 5 / 1020)
+        self.assertAlmostEqual(ttr.pos_inf_dirac_delta.mass, 5 / 1020)
+
+        parsed = DistributionalValue.parse(str(ttr))
+        assert parsed is not None
+        self.assertEqual(parsed.UR_order, 16 + 3)
+
+    def test_rejects_samples_without_a_ttr(self) -> None:
+        """No samples, samples that are equal or not finite, a negative order, and
+        samples too concentrated to split into that many Dirac deltas have no TTR,
+        and the error says which."""
+        concentrated = np.concatenate((np.full(999, 5.0), [5.000000000001]))
+        for name, samples, order, message in (
+            ("no samples", np.array([]), 3, "must not be empty"),
+            ("equal samples", np.full(1000, 5.0), 3, "all equal"),
+            ("no finite samples", np.full(50, np.nan), 3, "no sample is finite"),
+            ("negative order", np.array([1.0, 2.0, 4.0]), -1, "at least 0"),
+            ("concentrated samples", concentrated, 9, "too concentrated"),
+        ):
+            with self.subTest(name):
+                with self.assertRaises(ValueError) as raised:
+                    PlotData.ttr_from_samples(samples, order)
+                self.assertIn(message, str(raised.exception))
+
+    def test_concentrated_samples_reduce_at_a_lower_order(self) -> None:
+        """
+        999 samples at 5.0 and one at 5.000000000001 put 99.9% of the mass in bins
+        three doubles wide. Order 1 keeps that mass in one Dirac delta, but order 3
+        cannot split it into four parts at different positions.
+        """
+        samples = np.concatenate((np.full(999, 5.0), [5.000000000001]))
+
+        ttr = PlotData.ttr_from_samples(samples, 1)
+
+        self.assertEqual(len(ttr.dirac_deltas), 2)
+        for dirac_delta, position in zip(ttr.dirac_deltas, (5.0, 5.000000000001)):
+            self.assertAlmostEqual(
+                dirac_delta.position, position, delta=4 * math.ulp(5.0)
+            )
+        self.assertTrue(ttr.check_is_full_valid_TTR())
+        with self.assertRaises(ValueError) as raised:
+            PlotData.ttr_from_samples(samples, 3)
+        self.assertIn("too concentrated", str(raised.exception))
+
+    def test_a_reduction_onto_one_position_is_too_concentrated(self) -> None:
+        """
+        Splits only a few doubles wide can round the means of two parts onto one
+        position, which is no TTR. Whether a given split does depends on the last
+        bits of its masses, so the reduction is replaced by one that does.
+        """
+        coincident = [DiracDelta(5.0, mass=0.5), DiracDelta(5.0, mass=0.5)]
+        with mock.patch.object(PlotData, "_ttr_of_binning", return_value=coincident):
+            with self.assertRaises(ValueError) as raised:
+                PlotData.ttr_from_samples(np.array([5.0, 5.0, 6.0]), 1)
+
+        self.assertIn("too concentrated", str(raised.exception))
+
+    def test_equal_samples_reduce_to_one_dirac_delta_at_order_0(self) -> None:
+        """An order-0 TTR is a single Dirac delta, which equal samples have, so a
+        constant Monte Carlo output can be exported. Non-finite samples keep their
+        mass."""
+        samples = np.concatenate((np.full(999, 5.0), [np.nan]))
+
+        ttr = PlotData.ttr_from_samples(samples, 0)
+
+        self.assertEqual([dd.position for dd in ttr.finite_dirac_deltas], [5.0])
+        self.assertAlmostEqual(ttr.finite_dirac_deltas[0].mass, 0.999)
+        self.assertAlmostEqual(ttr.nan_dirac_delta.mass, 0.001)
+        parsed = DistributionalValue.parse(str(ttr))
+        assert parsed is not None
+        self.assertEqual([dd.position for dd in parsed.finite_dirac_deltas], [5.0])
+        self.assertAlmostEqual(parsed.nan_dirac_delta.mass, 0.001)
+
+    def test_rejects_samples_that_are_not_1d(self) -> None:
+        """A 2-D array of samples is rejected, rather than flattened with the mass
+        of each sample taken from its first axis."""
+        with self.assertRaises(ValueError) as raised:
+            PlotData.ttr_from_samples(np.zeros((1000, 2)), 3)
+
+        self.assertIn("1-D", str(raised.exception))
 
 
 if __name__ == "__main__":
