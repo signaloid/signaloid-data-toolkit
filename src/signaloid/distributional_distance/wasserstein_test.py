@@ -21,10 +21,13 @@
 """Tests for signaloid.distributional_distance.wasserstein."""
 
 import math
+import subprocess
+import sys
 import unittest
 from typing import Sequence
 
 import numpy as np
+from scipy.stats import wasserstein_distance  # type: ignore[import-untyped]
 
 from signaloid.distributional.dirac_delta import DiracDelta
 from signaloid.distributional.distributional import DistributionalValue
@@ -69,12 +72,9 @@ class TestWasserstein1Cores(unittest.TestCase):
         mc_samples_1 = np.sort(rng.standard_normal(DEFAULT_SAMPLE_SIZE))
         mc_samples_2 = np.sort(rng.standard_normal(DEFAULT_SAMPLE_SIZE))
 
-        all_values = np.concatenate([mc_samples_1, mc_samples_2])
-        all_values.sort()
         distance_unweighted = wasserstein_1_distance(
             u_values=mc_samples_1,
             v_values=mc_samples_2,
-            all_values=all_values,
         )
 
         uniform_u = np.ones(DEFAULT_SAMPLE_SIZE) / DEFAULT_SAMPLE_SIZE
@@ -99,13 +99,10 @@ class TestWasserstein1Cores(unittest.TestCase):
         masses = [0.15, 0.35, 0.35, 0.15]
         uxhw_dv = _dv_from_weighted_samples(positions, masses)
 
-        all_values = np.concatenate([mc_samples, uxhw_dv.positions])
-        all_values.sort()
         distance_mixed = wasserstein_1_distance_with_weights(
             u_values=mc_samples,
             v_values=uxhw_dv.positions,
             v_cum_weights=np.cumsum(uxhw_dv.masses),
-            all_values=all_values,
         )
 
         distance_paired = _wp_1d_weighted_pair(
@@ -126,18 +123,75 @@ class TestWasserstein1Cores(unittest.TestCase):
         u_values = np.array([0.0, 1.0, 2.0, 10.0])  # 10.0 is above v's max
         v_values = np.array([0.5, 1.5, 2.5])
         v_masses = np.array([0.2, 0.5, 0.3])
-        all_values = np.concatenate([u_values, v_values])
-        all_values.sort()
 
         # Must not raise.
         distance = wasserstein_1_distance_with_weights(
             u_values=u_values,
             v_values=v_values,
             v_cum_weights=np.cumsum(v_masses),
-            all_values=all_values,
         )
         self.assertGreater(distance, 0.0)
         self.assertTrue(np.isfinite(distance))
+
+
+class TestWasserstein1CoresWithTies(unittest.TestCase):
+    """`wasserstein_1_distance` and `wasserstein_1_distance_with_weights`, which
+    call `scipy.stats.wasserstein_distance`, agree with `_wp_1d_weighted_pair`,
+    which integrates the quantile functions instead of the CDFs, also when
+    samples tie."""
+
+    def test_match_the_quantile_formulation_with_ties_and_shared_values(
+        self,
+    ) -> None:
+        """Samples rounded to tenths have many ties, and v shares some with u.
+        The weighted variant also matches scipy given the weights themselves,
+        rather than their cumulative sum."""
+        rng = np.random.default_rng(seed=162)
+        for trial in range(50):
+            u_values = np.sort(
+                np.round(rng.standard_normal(int(rng.integers(1, 300))), 1)
+            )
+            v_values = np.sort(
+                np.concatenate(
+                    (
+                        np.round(rng.normal(0.3, 1.2, int(rng.integers(1, 300))), 1),
+                        u_values[:3],
+                    )
+                )
+            )
+            v_weights = rng.uniform(0.01, 1.0, len(v_values))
+
+            u_masses = np.ones(len(u_values))
+            with self.subTest(trial=trial):
+                self.assertTrue(
+                    math.isclose(
+                        wasserstein_1_distance(u_values, v_values),
+                        _wp_1d_weighted_pair(
+                            u_values, u_masses, v_values, np.ones(len(v_values))
+                        ),
+                        rel_tol=1e-12,
+                        abs_tol=1e-15,
+                    )
+                )
+                weighted = wasserstein_1_distance_with_weights(
+                    u_values, v_values, np.cumsum(v_weights)
+                )
+                self.assertTrue(
+                    math.isclose(
+                        weighted,
+                        _wp_1d_weighted_pair(u_values, u_masses, v_values, v_weights),
+                        rel_tol=1e-12,
+                        abs_tol=1e-15,
+                    )
+                )
+                self.assertTrue(
+                    math.isclose(
+                        weighted,
+                        wasserstein_distance(u_values, v_values, v_weights=v_weights),
+                        rel_tol=1e-12,
+                        abs_tol=1e-15,
+                    )
+                )
 
 
 class TestWeightedPairAnalytic(unittest.TestCase):
@@ -608,7 +662,6 @@ class TestLegacyHelperValidation(unittest.TestCase):
                 u_values=np.array([1.0, 2.0]),
                 v_values=np.array([]),
                 v_cum_weights=np.array([]),
-                all_values=np.array([1.0, 2.0]),
             )
         self.assertIn("v_cum_weights", str(ctx.exception))
 
@@ -618,7 +671,6 @@ class TestLegacyHelperValidation(unittest.TestCase):
                 u_values=np.array([]),
                 v_values=np.array([1.0, 2.0]),
                 v_cum_weights=np.cumsum(np.array([0.5, 0.5])),
-                all_values=np.array([1.0, 2.0]),
             )
         self.assertIn("u_values", str(ctx.exception))
 
@@ -630,7 +682,6 @@ class TestLegacyHelperValidation(unittest.TestCase):
                 u_values=np.array([1.0]),
                 v_values=np.array([1.0, 2.0, 3.0]),
                 v_cum_weights=np.cumsum(np.array([0.5, 0.5])),  # length 2 vs 3
-                all_values=np.array([1.0, 1.0, 2.0, 3.0]),
             )
         self.assertIn("same length", str(ctx.exception))
 
@@ -641,7 +692,6 @@ class TestLegacyHelperValidation(unittest.TestCase):
                 u_values=np.array([1.0, 2.0]),
                 v_values=np.array([1.0, 2.0]),
                 v_cum_weights=np.cumsum(np.array([0.0, 0.0])),
-                all_values=np.array([1.0, 1.0, 2.0, 2.0]),
             )
         self.assertIn("strictly positive", str(ctx.exception))
 
@@ -656,11 +706,49 @@ class TestLegacyHelperValidation(unittest.TestCase):
             ("empty v_values", np.array([1.0, 2.0]), np.array([])),
         ):
             with self.subTest(case=label):
-                all_vals = np.sort(np.concatenate([u, v]))
                 with self.assertRaises(ValueError) as ctx:
-                    wasserstein_1_distance(u_values=u, v_values=v, all_values=all_vals)
+                    wasserstein_1_distance(u_values=u, v_values=v)
                 expected = "u_values" if "u_values" in label else "v_values"
                 self.assertIn(expected, str(ctx.exception))
+
+    def test_all_values_is_deprecated_and_ignored(self) -> None:
+        """Passing `all_values`, which scipy does not need, warns and changes
+        nothing."""
+        u_values = np.array([0.0, 3.0, 10.0])
+        v_values = np.array([0.5, 1.5])
+        v_cum_weights = np.cumsum(np.array([0.3, 0.7]))
+        all_values = np.sort(np.concatenate((u_values, v_values)))
+
+        with self.assertWarns(DeprecationWarning):
+            unweighted = wasserstein_1_distance(u_values, v_values, all_values)
+        with self.assertWarns(DeprecationWarning):
+            weighted = wasserstein_1_distance_with_weights(
+                u_values, v_values, v_cum_weights, all_values
+            )
+
+        self.assertEqual(unweighted, wasserstein_1_distance(u_values, v_values))
+        self.assertEqual(
+            weighted,
+            wasserstein_1_distance_with_weights(u_values, v_values, v_cum_weights),
+        )
+
+    def test_importing_the_package_does_not_load_scipy(self) -> None:
+        """scipy.stats takes about a third of a second to load, so it is only
+        loaded once a function that uses it is called. This test module loads it
+        itself, so a new interpreter checks."""
+        loaded = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, signaloid.distributional_distance; "
+                "print('scipy.stats' in sys.modules)",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        self.assertEqual(loaded, "False")
 
 
 if __name__ == "__main__":

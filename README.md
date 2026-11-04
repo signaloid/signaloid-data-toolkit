@@ -100,3 +100,24 @@ samples = sample_generator(ux_string, n_samples=1000)
 
 To sample from a `DistributionalValue` that is already parsed, use
 `sample_from_distributional_value` from the same module.
+
+### Reduce Samples to a TTR
+Reduce samples, for example from a Monte Carlo run, to a TTR of a given order
+with the
+[`PlotData.ttr_from_samples` function](https://github.com/signaloid/signaloid-data-toolkit/blob/main/src/signaloid/distributional_information_plotting/plot_histogram_dirac_deltas.py),
+and export it as a Ux-string. An order of 9 gives a TTR of 2^9 = 512 Dirac
+deltas. Non-finite samples (`NaN`, `-Inf`, `+Inf`) are left out of the TTR and
+keep their share of the mass.
+
+```python
+from signaloid.distributional_information_plotting.plot_histogram_dirac_deltas import PlotData
+
+# Intermediate code which writes to samples
+# ...
+
+ux_string = str(PlotData.ttr_from_samples(samples, order=9))
+```
+
+The TTR is the one that plotting reduces `DistributionalValue.from_samples(samples)`
+to, but `ttr_from_samples` does not build a Dirac delta per sample, so a million
+samples take a fraction of a second.

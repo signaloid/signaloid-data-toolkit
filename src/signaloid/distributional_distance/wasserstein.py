@@ -21,6 +21,7 @@
 
 import argparse
 import sys
+import warnings
 
 import numpy as np
 import numpy.typing as npt
@@ -156,72 +157,86 @@ def wasserstein_p_distance(
     return _wp_1d_weighted_pair(u_pos, u_wts, v_pos, v_wts, p=p)
 
 
+def _scipy_wasserstein_distance(
+    u_values: np.ndarray,
+    v_values: np.ndarray,
+    v_weights: np.ndarray | None = None,
+) -> float:
+    """``scipy.stats.wasserstein_distance``, imported when first used. Loading
+    scipy.stats takes about a third of a second, which importing this package
+    should not cost callers that do not use it."""
+    from scipy.stats import wasserstein_distance  # type: ignore[import-untyped]
+
+    return float(wasserstein_distance(u_values, v_values, v_weights=v_weights))
+
+
+def _warn_that_all_values_is_ignored(all_values: np.ndarray | None) -> None:
+    """Warns callers still passing `all_values` that it is no longer used."""
+    if all_values is not None:
+        warnings.warn(
+            "all_values is ignored, as scipy sorts the samples itself, and will be "
+            "removed. Stop passing it.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+
 def wasserstein_1_distance(
     u_values: np.ndarray,
     v_values: np.ndarray,
-    all_values: np.ndarray,
+    all_values: np.ndarray | None = None,
 ) -> float:
-    """Wasserstein-1 distance between two equally-weighted sample sets.
-
-    Pure-numpy implementation that produces the same output as
-    ``scipy.stats.wasserstein_distance`` but requires all input arrays
-    to be pre-sorted and does not accept weights — both u and v are
-    treated as equal-mass samples.
+    """Wasserstein-1 distance between two equally-weighted sample sets,
+    computed by ``scipy.stats.wasserstein_distance``.
 
     Args:
-        u_values: Sorted unweighted samples from distribution A.
-        v_values: Sorted unweighted samples from distribution B.
-        all_values: Sorted concatenation of u_values and v_values.
+        u_values: Unweighted samples from distribution A.
+        v_values: Unweighted samples from distribution B.
+        all_values: Deprecated and ignored, as scipy sorts the samples itself.
+            Passing it warns.
 
     Returns:
         Wasserstein-1 distance between distribution A and distribution B.
 
     Raises:
-        ValueError: if u_values or v_values is empty (the empirical CDF
-            denominators `len(u_values)` and `len(v_values)` would
-            ZeroDivision otherwise).
+        ValueError: if u_values or v_values is empty.
     """
+    _warn_that_all_values_is_ignored(all_values)
     if len(u_values) == 0:
         raise ValueError("u_values must be non-empty.")
     if len(v_values) == 0:
         raise ValueError("v_values must be non-empty.")
-    deltas = np.diff(all_values)
 
-    u_cdf = np.zeros(len(all_values) - 1)
-    v_cdf = np.zeros(len(all_values) - 1)
-
-    u_idx, v_idx = 0, 0
-    for i in range(len(all_values) - 1):
-        while u_idx < len(u_values) and u_values[u_idx] <= all_values[i]:
-            u_idx += 1
-        while v_idx < len(v_values) and v_values[v_idx] <= all_values[i]:
-            v_idx += 1
-
-        u_cdf[i] = u_idx / len(u_values)
-        v_cdf[i] = v_idx / len(v_values)
-
-    return float(np.sum(np.abs(u_cdf - v_cdf) * deltas))
+    return _scipy_wasserstein_distance(u_values, v_values)
 
 
 def wasserstein_1_distance_with_weights(
     u_values: np.ndarray,
     v_values: np.ndarray,
     v_cum_weights: np.ndarray,
-    all_values: np.ndarray,
+    all_values: np.ndarray | None = None,
 ) -> float:
-    """Wasserstein-1 distance between an unweighted u and a weighted v.
+    """Wasserstein-1 distance between an unweighted u and a weighted v,
+    computed by ``scipy.stats.wasserstein_distance``.
 
     Args:
-        u_values: Sorted unweighted samples from distribution A.
-        v_values: Sorted positions of weighted samples from distribution B.
-        v_cum_weights: Cumulative sum of the sorted weights of
-            distribution B (the natural ``np.cumsum(masses)``). No
-            leading zero is required.
-        all_values: Sorted concatenation of u_values and v_values.
+        u_values: Unweighted samples from distribution A.
+        v_values: Positions of weighted samples from distribution B, in the
+            order of their weights in v_cum_weights.
+        v_cum_weights: Cumulative sum of the weights of distribution B (the
+            natural ``np.cumsum(masses)``). No leading zero is required.
+        all_values: Deprecated and ignored, as scipy sorts the samples itself.
+            Passing it warns.
 
     Returns:
         Wasserstein-1 distance between distribution A and distribution B.
+
+    Raises:
+        ValueError: if u_values or v_cum_weights is empty, if v_values and
+            v_cum_weights differ in length, or if the total weight is not
+            strictly positive.
     """
+    _warn_that_all_values_is_ignored(all_values)
     if len(u_values) == 0:
         raise ValueError("u_values must be non-empty.")
     if len(v_cum_weights) == 0:
@@ -231,34 +246,18 @@ def wasserstein_1_distance_with_weights(
             "v_values and v_cum_weights must have the same length "
             f"(got {len(v_values)} and {len(v_cum_weights)})."
         )
-    deltas = np.diff(all_values)
     v_total_weight = v_cum_weights[-1]
     if v_total_weight <= 0.0:
         raise ValueError(
             "v_cum_weights[-1] (total mass) must be strictly positive; "
             f"got {v_total_weight}."
         )
-    # Prepend 0 so v_cdf_lookup[k] is the mass of the first k v_values —
-    # in particular [0]=0 and [len(v)]=total. The original port indexed
-    # v_cum_weights[v_idx] directly, which was off by one and crashed
-    # when v_idx reached len(v_values). Equivalent to scipy's
-    # ``concatenate([0], cumsum)`` pattern.
-    v_cdf_lookup = np.concatenate(([0.0], v_cum_weights))
 
-    u_cdf = np.zeros(len(all_values) - 1)
-    v_cdf = np.zeros(len(all_values) - 1)
+    # scipy takes the weights themselves, which differences of the cumulative
+    # weights recover to rounding.
+    v_weights = np.diff(np.asarray(v_cum_weights, dtype=np.float64), prepend=0.0)
 
-    u_idx, v_idx = 0, 0
-    for i in range(len(all_values) - 1):
-        while u_idx < len(u_values) and u_values[u_idx] <= all_values[i]:
-            u_idx += 1
-        u_cdf[i] = u_idx / len(u_values)
-
-        while v_idx < len(v_values) and v_values[v_idx] <= all_values[i]:
-            v_idx += 1
-        v_cdf[i] = v_cdf_lookup[v_idx] / v_total_weight
-
-    return float(np.sum(np.abs(u_cdf - v_cdf) * deltas))
+    return _scipy_wasserstein_distance(u_values, v_values, v_weights)
 
 
 def wasserstein_p_uxhw_wrapper(
