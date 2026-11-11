@@ -1748,13 +1748,16 @@ class DistributionalValue:
 
         # Group the runs of equal positions, each into one at that position. Boolean
         # masks and slices select them, as the ulab NumPy of CircuitPython does not
-        # support integer-array indexing.
+        # support integer-array indexing. The arrays get explicit types, and the mask
+        # is filled in place, because ulab's `concatenate` needs arrays of one type
+        # and returns a mask that can no longer select.
         count = len(positions)
-        is_group_start = np.concatenate(
-            (np.array([True]), positions[1:] != positions[:-1])
-        )
+        is_group_start = np.full(count, True, dtype=np.bool)
+        is_group_start[1:] = positions[1:] != positions[:-1]
         group_starts = np.nonzero(is_group_start)[0]
-        group_ends = np.concatenate((group_starts[1:], np.array([count])))
+        group_ends = np.concatenate(
+            (group_starts[1:], np.array([count], dtype=group_starts.dtype))
+        )
         group_positions = positions[is_group_start]
         group_masses = masses[is_group_start]
         equal_position_groups = [
@@ -1794,7 +1797,7 @@ class DistributionalValue:
             chains.append((first, end, position, mass))
             next_group = end + 1
 
-        keep = np.full(len(group_positions), True)
+        keep = np.full(len(group_positions), True, dtype=np.bool)
         for first, end, position, mass in chains:
             group_positions[first] = position
             group_masses[first] = mass
