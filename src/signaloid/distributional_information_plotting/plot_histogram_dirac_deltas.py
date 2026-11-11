@@ -22,8 +22,6 @@
 import os
 import sys
 import math
-import functools
-import operator
 
 if sys.implementation.name != "circuitpython":
     # Use numpy for accelerated computing
@@ -1411,7 +1409,9 @@ class PlotData:
                 self.positions = boundary_positions
                 self.masses = bin_heights
                 return
-            except (ValueError, TypeError):
+            # On CircuitPython, a bin narrower than single precision resolves has no
+            # width, and dividing by it raises where NumPy gives an infinity.
+            except (ValueError, TypeError, ZeroDivisionError):
                 pass
 
         # For non-TTR input, use the non-uniform binning instead, which places one bin per Dirac delta with boundaries
@@ -1434,18 +1434,24 @@ class PlotData:
                 finite_dirac_deltas = PlotData._ttr_of_binning(
                     finite_positions, finite_masses, reduction_order
                 )
-            except ValueError:
+            # On CircuitPython, a support too narrow for single precision gives bins
+            # with no width, and dividing by one raises ZeroDivisionError.
+            except (ValueError, ZeroDivisionError):
                 # A support only a few ulps wide cannot be split. Merge runs of
                 # neighbouring Dirac deltas instead, into as many as the TTR
-                # would give. Each merge keeps the mass and the mean.
-                groups = np.array_split(
-                    np.arange(len(finite_dirac_deltas)), 2**reduction_order
-                )
+                # would give. Each merge keeps the mass and the mean. The runs
+                # are those `np.array_split` gives, which ulab lacks: the first
+                # `longer` of them hold one more Dirac delta.
+                size, longer = divmod(len(finite_dirac_deltas), 2**reduction_order)
+                bounds = [
+                    run * size + min(run, longer)
+                    for run in range(2**reduction_order + 1)
+                ]
                 finite_dirac_deltas = [
-                    functools.reduce(
-                        operator.add, (finite_dirac_deltas[i] for i in group)
+                    sum(
+                        finite_dirac_deltas[start + 1 : end], finite_dirac_deltas[start]
                     )
-                    for group in groups
+                    for start, end in zip(bounds, bounds[1:])
                 ]
 
         boundary_positions, bin_widths, bin_heights = (

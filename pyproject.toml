@@ -34,21 +34,29 @@ requires = ["poetry-core>=1.9.1", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
 build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry.dependencies]
-python = ">=3.11,<4"
+python = ">=3.10,<4"
 numpy = [
-	{ version = ">=2.0.0", python = ">=3.11,<3.13" },
-	{ version = ">=2.1.0", python = ">=3.11,<3.14" },
+	{ version = ">=2.0.0", python = ">=3.10,<3.13" },
+	{ version = ">=2.1.0", python = ">=3.10,<3.14" },
 	{ version = ">=2.4.1", python = ">=3.11,<3.15" },
 	{ version = ">=2.5.2", python = ">=3.15,<3.16" },
 ]
 matplotlib = [
-	{ version = ">=3.9.0", python = ">=3.11,<3.13" },
-	{ version = ">=3.10.0", python = ">=3.11,<3.14" },
-	{ version = ">=3.10.5", python = ">=3.11,<3.15" },
+	{ version = ">=3.9.0", python = ">=3.10,<3.13" },
+	{ version = ">=3.10.0", python = ">=3.10,<3.14" },
+	{ version = ">=3.10.5", python = ">=3.10,<3.15" },
 	{ version = ">=3.11.2", python = ">=3.15,<3.16" },
 ]
-pillow = ">=13.0.0"
-scipy = ">=1.14.0"
+# Pillow 13.0.0 fixes the security advisories against 12.x but requires
+# Python 3.11, so Python 3.10 stays on 12.3.0, the last release supporting it.
+pillow = [
+	{ version = ">=12.3.0,<13", python = ">=3.10,<3.11" },
+	{ version = ">=13.0.0", python = ">=3.11" },
+]
+scipy = [
+	{ version = ">=1.13.0,<1.16.0", python = ">=3.10,<3.11" },
+	{ version = ">=1.14.0", python = ">=3.11" },
+]
 
 [tool.poetry.scripts]
 signaloid-uxdata-toolkit = "signaloid.uxdata_toolkit:main"
@@ -57,7 +65,10 @@ signaloid-uxdata-toolkit = "signaloid.uxdata_toolkit:main"
 warn_unused_configs = true
 strict = true
 disallow_any_generics = false
-python_version = "3.11"
+# No `python_version`: mypy targets the interpreter it runs under, so it always
+# matches the installed stubs. numpy >= 2.4 (Python >= 3.11 only) types
+# `ndarray.copy()` with `typing.Self`, which a 3.10 target reads as `Any`. CI
+# type-checks on the oldest supported Python.
 exclude = '(^|/)\.venv/'
 # `signaloid` is a PEP 420 namespace package, so it has no top-level `py.typed`
 # marker. Resolve it from the source tree (via `mypy_path`) rather than as an

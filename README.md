@@ -16,7 +16,7 @@ repository.
 
 ## Requirements
 
-The Signaloid Data Toolkit requires Python 3.11 or later. See
+The Signaloid Data Toolkit requires Python 3.10 or later. See
 `pyproject.toml` for the full list of dependencies.
 
 ## Installation

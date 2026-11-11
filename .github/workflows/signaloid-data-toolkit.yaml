@@ -18,8 +18,8 @@ jobs:
       matrix:
         args:
           - host: ubuntu-26.04
-          - host: macos-14
-        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+          - host: macos-26
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
 
     runs-on:  ${{ matrix.args.host }}
 
@@ -77,7 +77,7 @@ jobs:
 
     - name: Typecheck
       # Run mypy just once on the oldest supported Python version
-      if: ${{ matrix.args.host == 'ubuntu-26.04' && matrix.python-version == '3.11' }}
+      if: ${{ matrix.args.host == 'ubuntu-26.04' && matrix.python-version == '3.10' }}
       run: poetry run mypy -p signaloid
 
     - name: Test
@@ -109,6 +109,40 @@ jobs:
         gh release upload ${{ github.event.release.tag_name }} dist/*
       env:
         GITHUB_TOKEN: ${{ github.token }}
+
+  # The CircuitPython code (signaloid.circuitpython, and the distributional and
+  # plotting modules it uses) runs on a MicroPython core with ulab, which have only
+  # part of the standard library and of NumPy. Check that it compiles with
+  # CircuitPython's mpy-cross, and that the plotting path of the Cardputer demo
+  # runs in a CircuitPython emulator (see .github/circuitpython/README.md).
+  circuitpython:
+    runs-on: ubuntu-26.04
+
+    steps:
+    - name: Checkout the PR branch
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ github.head_ref }}
+
+    - name: Restore the CircuitPython emulator
+      uses: actions/cache@v6
+      with:
+        path: ~/circuitpython-emulator/bin
+        key: circuitpython-emulator-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/circuitpython/setup-emulator.sh') }}
+
+    - name: Build the CircuitPython emulator
+      run: bash .github/circuitpython/setup-emulator.sh ~/circuitpython-emulator
+
+    - name: Compile with CircuitPython's mpy-cross
+      working-directory: src
+      run: |
+        find signaloid/circuitpython signaloid/distributional signaloid/distributional_information_plotting \
+          -name '*.py' -not -name '*_test.py' | while read -r file; do
+          ~/circuitpython-emulator/bin/mpy-cross -o /dev/null "$file" || exit 1
+        done
+
+    - name: Plot in the CircuitPython emulator
+      run: ~/circuitpython-emulator/bin/micropython -X heapsize=64M .github/circuitpython/check_plotting.py src
 
   # Publish the built wheels to PyPI
   publish:
